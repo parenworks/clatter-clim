@@ -34,17 +34,33 @@
 ;;; The mailbox
 ;;; ----------------------------------------------------------------------
 
+;;; We wake the frame with our own event rather than EXECUTE-FRAME-COMMAND.
+;;; Routing a command from another thread makes McCLIM throw it into the
+;;; active command reader, which echoes it into the interactor (the
+;;; CLATTER-CLIM::COM-DRAIN spam).  A plain window-manager-event is handled
+;;; directly by HANDLE-EVENT and never touches the command reader.
+(defclass ui-drain-event (clim:window-manager-event)
+  ((sheet :initarg :sheet :reader clim:event-sheet)
+   (frame :initarg :frame :reader ui-drain-event-frame)))
+
+(defmethod clim:handle-event (sheet (event ui-drain-event))
+  (declare (ignore sheet))
+  (drain-mailbox (ui-drain-event-frame event)))
+
 (defun post-update (frame update)
   "Called on the IRC reader thread.  Enqueue UPDATE and wake the frame.
-UPDATE is a list whose head is a keyword (see APPLY-UPDATE)."
+UPDATE is a list whose head is a keyword (see APPLY-UPDATE).  Thread-safe:
+this only locks the mailbox and posts an event; it never touches panes."
   (bt:with-lock-held ((app-mailbox-lock frame))
     (push update (app-mailbox frame)))
-  ;; Thread-safe: this enqueues an event for the frame thread, it does not
-  ;; touch panes from here.
-  (execute-frame-command frame (list 'com-drain)))
+  (let ((sheet (clim:frame-top-level-sheet frame)))
+    (when sheet
+      (clim:queue-event sheet (make-instance 'ui-drain-event
+                                             :sheet sheet :frame frame)))))
 
 (defun drain-mailbox (frame)
-  "Called on the frame thread by COM-DRAIN.  Apply every pending update."
+  "Called on the frame thread by HANDLE-EVENT for UI-DRAIN-EVENT.
+Apply every pending update, then repaint."
   (let ((items nil))
     (bt:with-lock-held ((app-mailbox-lock frame))
       (setf items (nreverse (app-mailbox frame))
@@ -67,22 +83,24 @@ UPDATE is a list whose head is a keyword (see APPLY-UPDATE)."
                           (make-irc-line :system nil text))))
       (:join
        (destructuring-bind (channel nick) args
-         (let ((b (ensure-buffer frame channel :channel)))
-           (pushnew nick (buffer-users b) :test #'string-equal)
-           (buffer-add-line b (make-irc-line :join nick (format nil "~A has joined" nick))))))
+         (buffer-add-line (ensure-buffer frame channel :channel)
+                          (make-irc-line :join nick (format nil "~A has joined" nick)))))
       (:part
        (destructuring-bind (channel nick reason) args
-         (let ((b (ensure-buffer frame channel :channel)))
-           (setf (buffer-users b)
-                 (remove nick (buffer-users b) :test #'string-equal))
-           (buffer-add-line b (make-irc-line :part nick
-                                         (format nil "~A has left~@[ (~A)~]" nick reason))))))
+         (buffer-add-line (ensure-buffer frame channel :channel)
+                          (make-irc-line :part nick
+                                         (format nil "~A has left~@[ (~A)~]" nick reason)))))
       (:topic
        (destructuring-bind (channel text) args
          (setf (buffer-topic (ensure-buffer frame channel :channel)) text)))
       (:names
        (destructuring-bind (channel nicks) args
-         (setf (buffer-users (ensure-buffer frame channel :channel)) nicks))))))
+         (setf (buffer-users (ensure-buffer frame channel :channel)) nicks)))
+      (:disconnected
+       (dolist (b (app-buffers frame))
+         (buffer-add-line b (make-irc-line :system nil "disconnected"))
+         (when (eq (buffer-kind b) :channel)
+           (setf (buffer-users b) '())))))))
 
 ;;; ----------------------------------------------------------------------
 ;;; Hook installation: clatter-irc events -> mailbox updates
@@ -91,12 +109,31 @@ UPDATE is a list whose head is a keyword (see APPLY-UPDATE)."
 (defun install-irc-hooks (frame conn)
   "Wire clatter-irc hooks so inbound events post mailbox updates for FRAME.
 The hook lambda lists match the signatures documented in clatter-irc."
-  (flet ((server-name ()
-           (or (irc:connection-server conn) "server")))
+  (labels ((server-name ()
+             (or (irc:connection-server conn) "server"))
+           ;; Membership is owned by clatter-irc, which tracks channel-users
+           ;; (including op/voice prefixes).  We just mirror its current view
+           ;; into the buffer's nick list via a :names update.
+           (refresh-channel (channel)
+             (let ((ch (irc:find-channel conn channel)))
+               (when ch
+                 (post-update frame (list :names (irc:channel-name ch)
+                                          (irc:channel-user-nicks-with-prefix ch))))))
+           (refresh-all ()
+             (dolist (ch (irc:joined-channels conn))
+               (post-update frame (list :names (irc:channel-name ch)
+                                        (irc:channel-user-nicks-with-prefix ch))))))
     (irc:add-hook conn 'irc:on-connect
       (lambda (c)
         (declare (ignore c))
-        (post-update frame (list :system (server-name) "connected"))))
+        (post-update frame (list :system (server-name) "connected"))
+        ;; Auto-join the persisted channels so you do not re-join by hand.
+        (dolist (chan (config-autojoin *config*))
+          (irc:join conn chan))))
+    (irc:add-hook conn 'irc:on-disconnect
+      (lambda (c)
+        (declare (ignore c))
+        (post-update frame (list :disconnected))))
     (irc:add-hook conn 'irc:on-privmsg
       (lambda (c msg sender target text)
         (declare (ignore c msg))
@@ -108,18 +145,51 @@ The hook lambda lists match the signatures documented in clatter-irc."
         (declare (ignore c msg))
         (let ((buf (if (irc:channel-name-p target) target (server-name))))
           (post-update frame (list :line buf (make-irc-line :notice sender text))))))
+    (irc:add-hook conn 'irc:on-ctcp
+      (lambda (c msg sender target command args)
+        (declare (ignore c msg))
+        ;; Render /me (CTCP ACTION) as an action line; ignore other CTCP.
+        (when (string-equal command "ACTION")
+          (let ((buf (if (irc:channel-name-p target) target sender)))
+            (post-update frame
+                         (list :line buf
+                               (make-irc-line :privmsg sender
+                                              (format nil "* ~A ~A" sender args))))))))
     (irc:add-hook conn 'irc:on-join
       (lambda (c msg nick channel)
         (declare (ignore c msg))
-        (post-update frame (list :join channel nick))))
+        ;; When we join a channel ourselves, remember it for next time.
+        (when (irc:nick-equal nick (irc:connection-nick conn))
+          (config-add-autojoin channel))
+        (post-update frame (list :join channel nick))
+        (refresh-channel channel)))
     (irc:add-hook conn 'irc:on-part
       (lambda (c msg nick channel reason)
         (declare (ignore c msg))
-        (post-update frame (list :part channel nick reason))))
+        ;; When we part a channel ourselves, stop auto-joining it.
+        (when (irc:nick-equal nick (irc:connection-nick conn))
+          (config-remove-autojoin channel))
+        (post-update frame (list :part channel nick reason))
+        (refresh-channel channel)))
+    (irc:add-hook conn 'irc:on-quit
+      (lambda (c msg nick reason)
+        (declare (ignore c msg nick reason))
+        (refresh-all)))
+    (irc:add-hook conn 'irc:on-nick
+      (lambda (c msg old-nick new-nick)
+        (declare (ignore c msg old-nick new-nick))
+        (refresh-all)))
     (irc:add-hook conn 'irc:on-topic
       (lambda (c msg setter channel topic)
         (declare (ignore c msg setter))
         (post-update frame (list :topic channel topic))))
+    ;; 353 = RPL_NAMREPLY, 366 = RPL_ENDOFNAMES.  clatter-irc has already
+    ;; folded the names into channel-users by the time this hook runs.
+    (irc:add-hook conn 'irc:on-numeric
+      (lambda (c msg code name)
+        (declare (ignore c msg name))
+        (when (member code '(353 366))
+          (refresh-all))))
     (irc:add-hook conn 'irc:on-error
       (lambda (c msg text)
         (declare (ignore c msg))

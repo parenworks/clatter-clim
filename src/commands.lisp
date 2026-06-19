@@ -34,13 +34,19 @@
 (define-clatter-clim-command (com-disconnect :name "Disconnect")
     (&key (message 'string :default "clatter-clim"))
   (let* ((frame *application-frame*) (conn (app-connection frame)))
-    (when conn (ignore-errors (irc:disconnect conn message)))
+    (when conn
+      ;; Turn off auto-reconnect first, or the reader thread reconnects a few
+      ;; seconds after we close the socket.
+      (setf (irc:connection-reconnect-enabled conn) nil)
+      (ignore-errors (irc:disconnect conn message)))
     (redisplay-current frame)))
 
 (define-clatter-clim-command (com-quit :name "Quit")
     (&key (message 'string :default "clatter-clim"))
   (let* ((frame *application-frame*) (conn (app-connection frame)))
-    (when conn (ignore-errors (irc:quit conn message)))
+    (when conn
+      (setf (irc:connection-reconnect-enabled conn) nil)
+      (ignore-errors (irc:quit conn message)))
     (frame-exit frame)))
 
 ;;; Send a PRIVMSG to any target.  This is the path to services such as
@@ -91,14 +97,39 @@
          (b (app-current frame)))
     (when (and conn b (buffer-target-p b))
       (irc:privmsg conn (buffer-name b) text)
-      (buffer-add-line b (make-irc-line :privmsg (irc:connection-nick conn) text))
-      (redisplay-current frame))))
+      ;; With echo-message active, the server echoes our own PRIVMSG back and
+      ;; on-privmsg renders it; echoing locally too would double it.  Only
+      ;; echo locally when the server will not.
+      (unless (irc:cap-enabled-p conn "echo-message")
+        (buffer-add-line b (make-irc-line :privmsg (irc:connection-nick conn) text))
+        (redisplay-current frame)))))
 
-;;; Internal command with no command-line name: this is the wake-up that the
-;;; IRC reader thread posts via EXECUTE-FRAME-COMMAND.  It drains the mailbox
-;;; on the frame thread and repaints.  See bridge.lisp.
-(define-clatter-clim-command (com-drain :name nil) ()
-  (drain-mailbox *application-frame*))
+(define-clatter-clim-command (com-nick :name "Nick")
+    ((new-nick 'string))
+  (let ((conn (app-connection *application-frame*)))
+    (when conn (irc:nick conn new-nick))))
+
+(define-clatter-clim-command (com-me :name "Me")
+    ((action 'string))
+  (let* ((frame *application-frame*)
+         (conn (app-connection frame))
+         (b (app-current frame)))
+    (when (and conn b (buffer-target-p b))
+      (irc:ctcp conn (buffer-name b) "ACTION" action)
+      (unless (irc:cap-enabled-p conn "echo-message")
+        (buffer-add-line b (make-irc-line :privmsg (irc:connection-nick conn)
+                                          (format nil "* ~A ~A"
+                                                  (irc:connection-nick conn) action)))
+        (redisplay-current frame)))))
+
+;;; Internal: print a client-side note into the current buffer (no name, not
+;;; user-invokable).  Used by the slash-command parser for unknown commands.
+(define-clatter-clim-command (com-note :name nil)
+    ((text 'string))
+  (let* ((frame *application-frame*) (b (app-current frame)))
+    (when b
+      (buffer-add-line b (make-irc-line :system nil text))
+      (redisplay-current frame))))
 
 ;;; ----------------------------------------------------------------------
 ;;; Presentation translators: click an IRC noun, run a command

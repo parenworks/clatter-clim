@@ -20,6 +20,7 @@ does not have to depend on the truetype backend being present."
   "Run the frame returned by MAKE-FRAME, optionally in its own CLIM process.
 The font path must be limited before MAKE-FRAME creates the port."
   (%limit-font-path)
+  (load-config)
   (flet ((launch () (run-frame-top-level (funcall make-frame))))
     (if new-process
         (clim-sys:make-process #'launch :name "clatter-clim")
@@ -45,6 +46,7 @@ foreground so the image stays alive until the frame exits."
 Loads :mcclim-charmed on demand."
   (asdf:load-system :mcclim-charmed)
   (%limit-font-path)
+  (load-config)
   ;; clim-charmed:run-frame-on-charmed-with-interactor handles port lifecycle
   ;; and terminal restoration; it expects an application-frame class name.
   (uiop:symbol-call :clim-charmed :run-frame-on-charmed-with-interactor
