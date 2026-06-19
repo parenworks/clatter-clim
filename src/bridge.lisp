@@ -76,20 +76,42 @@ Apply every pending update, then repaint."
     (ecase kind
       (:line
        (destructuring-bind (target line) args
-         (buffer-add-line (ensure-buffer frame target :channel) line)))
+         (unless (nick-ignored-p frame (irc-line-nick line))
+           (let ((b (ensure-buffer frame target :channel)))
+             (buffer-add-line b line)
+             (note-activity frame b line)
+             (log-line frame target line)))))
       (:system
        (destructuring-bind (target text) args
-         (buffer-add-line (ensure-buffer frame target :server)
-                          (make-irc-line :system nil text))))
+         (let ((line (make-irc-line :system nil text)))
+           (buffer-add-line (ensure-buffer frame target :server) line)
+           (log-line frame target line))))
+      (:info
+       ;; A server-originated informational line (whois, MOTD, lusers, ...).
+       ;; SCOPE is :server (the server buffer) or :current (wherever the user
+       ;; is looking, e.g. the channel they ran /whois from).
+       (destructuring-bind (scope text) args
+         (let* ((server (or (and (app-connection frame)
+                                 (irc:connection-server (app-connection frame)))
+                            "server"))
+                (b (ecase scope
+                     (:current (or (app-current frame)
+                                   (ensure-buffer frame server :server)))
+                     (:server (ensure-buffer frame server :server))))
+                (line (make-irc-line :system nil text)))
+           (buffer-add-line b line)
+           (log-line frame (buffer-name b) line))))
       (:join
        (destructuring-bind (channel nick) args
-         (buffer-add-line (ensure-buffer frame channel :channel)
-                          (make-irc-line :join nick (format nil "~A has joined" nick)))))
+         (let ((line (make-irc-line :join nick (format nil "~A has joined" nick))))
+           (buffer-add-line (ensure-buffer frame channel :channel) line)
+           (log-line frame channel line))))
       (:part
        (destructuring-bind (channel nick reason) args
-         (buffer-add-line (ensure-buffer frame channel :channel)
-                          (make-irc-line :part nick
-                                         (format nil "~A has left~@[ (~A)~]" nick reason)))))
+         (let ((line (make-irc-line :part nick
+                                    (format nil "~A has left~@[ (~A)~]" nick reason))))
+           (buffer-add-line (ensure-buffer frame channel :channel) line)
+           (log-line frame channel line))))
       (:topic
        (destructuring-bind (channel text) args
          (setf (buffer-topic (ensure-buffer frame channel :channel)) text)))
@@ -101,6 +123,24 @@ Apply every pending update, then repaint."
          (buffer-add-line b (make-irc-line :system nil "disconnected"))
          (when (eq (buffer-kind b) :channel)
            (setf (buffer-users b) '())))))))
+
+;;; ----------------------------------------------------------------------
+;;; Server numeric replies
+;;; ----------------------------------------------------------------------
+
+(defparameter *whois-numerics*
+  '(301 307 311 312 313 314 317 318 319 320 330 338 369 378 379 671)
+  "WHOIS / WHOWAS reply codes, routed to the current buffer.")
+
+(defparameter *numeric-skip*
+  '(005 324 329 332 333)
+  "Numerics handled elsewhere (topic, modes) or too noisy to print (ISUPPORT).
+NAMREPLY/ENDOFNAMES (353/366) are handled separately to refresh the nick list.")
+
+(defun numeric-text (msg)
+  "Readable text for a numeric reply: every parameter after the first (which is
+our own nick) joined with spaces."
+  (string-trim " " (format nil "~{~A~^ ~}" (rest (irc:message-params msg)))))
 
 ;;; ----------------------------------------------------------------------
 ;;; Hook installation: clatter-irc events -> mailbox updates
@@ -118,7 +158,10 @@ The hook lambda lists match the signatures documented in clatter-irc."
              (let ((ch (irc:find-channel conn channel)))
                (when ch
                  (post-update frame (list :names (irc:channel-name ch)
-                                          (irc:channel-user-nicks-with-prefix ch))))))
+                                          (irc:channel-user-nicks-with-prefix ch)))
+                 (let ((topic (irc:channel-topic ch)))
+                   (when topic
+                     (post-update frame (list :topic (irc:channel-name ch) topic)))))))
            (refresh-all ()
              (dolist (ch (irc:joined-channels conn))
                (post-update frame (list :names (irc:channel-name ch)
@@ -183,13 +226,24 @@ The hook lambda lists match the signatures documented in clatter-irc."
       (lambda (c msg setter channel topic)
         (declare (ignore c msg setter))
         (post-update frame (list :topic channel topic))))
-    ;; 353 = RPL_NAMREPLY, 366 = RPL_ENDOFNAMES.  clatter-irc has already
-    ;; folded the names into channel-users by the time this hook runs.
+    ;; Numeric replies.  353 = RPL_NAMREPLY, 366 = RPL_ENDOFNAMES: clatter-irc
+    ;; has already folded the names into channel-users, so we just refresh the
+    ;; nick list.  WHOIS replies go to the current buffer (where the user ran
+    ;; whois); everything else lands in the server buffer so it is no longer
+    ;; silent.  Structural/noisy numerics are skipped.
     (irc:add-hook conn 'irc:on-numeric
       (lambda (c msg code name)
-        (declare (ignore c msg name))
-        (when (member code '(353 366))
-          (refresh-all))))
+        (declare (ignore c name))
+        (cond
+          ((member code '(353 366)) (refresh-all))
+          ((member code *numeric-skip*) nil)
+          (t (let ((text (numeric-text msg)))
+               (when (plusp (length text))
+                 (post-update frame
+                              (list :info
+                                    (if (member code *whois-numerics*)
+                                        :current :server)
+                                    text))))))))
     (irc:add-hook conn 'irc:on-error
       (lambda (c msg text)
         (declare (ignore c msg))

@@ -14,6 +14,10 @@
   :inherit-from 'string
   :description "an IRC channel name")
 
+(define-presentation-type url ()
+  :inherit-from 'string
+  :description "a web URL")
+
 (define-presentation-type buffer ()
   :description "a conversation buffer")
 

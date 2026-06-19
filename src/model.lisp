@@ -21,6 +21,10 @@
    (lines :initform (make-array 0 :adjustable t :fill-pointer 0)
           :accessor buffer-lines)
    (topic :initform "" :accessor buffer-topic)
+   (unread :initform 0 :accessor buffer-unread
+           :documentation "Count of unseen message lines since this buffer was last current.")
+   (ping :initform nil :accessor buffer-ping
+         :documentation "True when an unseen line in this buffer mentioned our nick.")
    (users :initform '() :accessor buffer-users
           :documentation "List of nick strings present in a channel buffer."))
   (:documentation "A server, channel, or query conversation."))

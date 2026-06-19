@@ -103,6 +103,17 @@ TLS handshake never freezes the frame."
   (let ((conn (app-connection *application-frame*)))
     (when conn (irc:part conn channel))))
 
+;;; Open a clicked URL in the system browser.  XDG-OPEN is the Linux launcher;
+;;; the call is best-effort so a missing launcher never errors into the UI.
+(defun open-url (url)
+  "Hand URL to the desktop's default web browser."
+  (ignore-errors
+    (uiop:launch-program (list "xdg-open" url))))
+
+(define-clatter-clim-command (com-open-url :name "Open URL")
+    ((url 'url))
+  (open-url url))
+
 (define-clatter-clim-command (com-whois :name "Whois")
     ((who 'nick))
   (let ((conn (app-connection *application-frame*)))
@@ -131,7 +142,9 @@ TLS handshake never freezes the frame."
       ;; on-privmsg renders it; echoing locally too would double it.  Only
       ;; echo locally when the server will not.
       (unless (irc:cap-enabled-p conn "echo-message")
-        (buffer-add-line b (make-irc-line :privmsg (irc:connection-nick conn) text))
+        (let ((line (make-irc-line :privmsg (irc:connection-nick conn) text)))
+          (buffer-add-line b line)
+          (log-line frame (buffer-name b) line))
         (redisplay-current frame)))))
 
 (define-clatter-clim-command (com-nick :name "Nick")
@@ -147,9 +160,11 @@ TLS handshake never freezes the frame."
     (when (and conn b (buffer-target-p b))
       (irc:ctcp conn (buffer-name b) "ACTION" action)
       (unless (irc:cap-enabled-p conn "echo-message")
-        (buffer-add-line b (make-irc-line :privmsg (irc:connection-nick conn)
-                                          (format nil "* ~A ~A"
-                                                  (irc:connection-nick conn) action)))
+        (let ((line (make-irc-line :privmsg (irc:connection-nick conn)
+                                   (format nil "* ~A ~A"
+                                           (irc:connection-nick conn) action))))
+          (buffer-add-line b line)
+          (log-line frame (buffer-name b) line))
         (redisplay-current frame)))))
 
 ;;; Internal: print a client-side note into the current buffer (no name, not
@@ -160,6 +175,71 @@ TLS handshake never freezes the frame."
     (when b
       (buffer-add-line b (make-irc-line :system nil text))
       (redisplay-current frame))))
+
+;;; ----------------------------------------------------------------------
+;;; Nick operator / moderation actions (the right-click nick menu).  Each
+;;; operates on the current channel and the clicked nick; outside a channel
+;;; they are harmless no-ops.
+;;; ----------------------------------------------------------------------
+
+(defun bare-nick (nick)
+  "NICK with any mode-prefix characters (@%+~&!.) stripped."
+  (string-left-trim "@%+~&!." nick))
+
+(defun current-channel-name (frame)
+  "The current buffer's name when it is a channel, else NIL."
+  (let ((b (app-current frame)))
+    (and b (eq (buffer-kind b) :channel) (buffer-name b))))
+
+(defun nick-ignored-p (frame nick)
+  "True when NICK (prefixes and case ignored) is on FRAME's ignore list."
+  (and nick
+       (member (string-downcase (bare-nick nick))
+               (app-ignored frame) :test #'string=)
+       t))
+
+(defmacro define-nick-mode-command (name title mode-string)
+  "Define a channel-mode nick command NAME with menu TITLE that applies
+MODE-STRING (e.g. \"+o\") to the clicked nick in the current channel."
+  `(define-clatter-clim-command (,name :name ,title)
+       ((who 'nick))
+     (let* ((frame *application-frame*)
+            (conn (app-connection frame))
+            (chan (current-channel-name frame)))
+       (when (and conn chan)
+         (irc:mode conn chan ,mode-string (bare-nick who))))))
+
+(define-nick-mode-command com-op      "Op"       "+o")
+(define-nick-mode-command com-deop    "De-op"    "-o")
+(define-nick-mode-command com-voice   "Voice"    "+v")
+(define-nick-mode-command com-devoice "De-voice" "-v")
+
+(define-clatter-clim-command (com-kick :name "Kick")
+    ((who 'nick))
+  (let* ((frame *application-frame*)
+         (conn (app-connection frame))
+         (chan (current-channel-name frame)))
+    (when (and conn chan)
+      (irc:kick conn chan (bare-nick who)))))
+
+(define-clatter-clim-command (com-ban :name "Ban")
+    ((who 'nick))
+  (let* ((frame *application-frame*)
+         (conn (app-connection frame))
+         (chan (current-channel-name frame)))
+    (when (and conn chan)
+      (irc:mode conn chan "+b" (format nil "~A!*@*" (bare-nick who))))))
+
+(define-clatter-clim-command (com-ignore :name "Ignore")
+    ((who 'nick))
+  (let* ((frame *application-frame*)
+         (bare (string-downcase (bare-nick who)))
+         (now-ignoring (not (member bare (app-ignored frame) :test #'string=))))
+    (setf (app-ignored frame)
+          (if now-ignoring
+              (cons bare (app-ignored frame))
+              (remove bare (app-ignored frame) :test #'string=)))
+    (com-note (format nil "~:[no longer ignoring~;ignoring~] ~A" now-ignoring bare))))
 
 ;;; ----------------------------------------------------------------------
 ;;; Presentation translators: click an IRC noun, run a command
@@ -173,8 +253,28 @@ TLS handshake never freezes the frame."
     (nick com-query clatter-clim :gesture :describe :documentation "Open query")
     (object) (list object))
 
+;;; Right-click a nick for the rest of the actions.  These have :gesture NIL so
+;;; they never fire on a plain click, but with :menu T (the default) they all
+;;; appear in McCLIM's presentation menu (the global :menu gesture, right
+;;; button), alongside Whois and Open query.
+(macrolet ((menu-action (name command doc)
+             `(define-presentation-to-command-translator ,name
+                  (nick ,command clatter-clim :gesture nil :documentation ,doc)
+                  (object) (list object))))
+  (menu-action nick-to-op      com-op      "Op")
+  (menu-action nick-to-deop    com-deop    "De-op")
+  (menu-action nick-to-voice   com-voice   "Voice")
+  (menu-action nick-to-devoice com-devoice "De-voice")
+  (menu-action nick-to-kick    com-kick    "Kick")
+  (menu-action nick-to-ban     com-ban     "Ban")
+  (menu-action nick-to-ignore  com-ignore  "Ignore / unignore"))
+
 (define-presentation-to-command-translator channel-to-join
     (irc-channel com-join clatter-clim :gesture :select :documentation "Join")
+    (object) (list object))
+
+(define-presentation-to-command-translator url-to-open
+    (url com-open-url clatter-clim :gesture :select :documentation "Open URL")
     (object) (list object))
 
 (define-presentation-to-command-translator buffer-to-switch

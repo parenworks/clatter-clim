@@ -82,3 +82,24 @@ Then reflect server/port/nick into the connect defaults.  Returns *CONFIG*."
     (setf (config-autojoin *config*)
           (remove channel (config-autojoin *config*) :test #'string-equal))
     (save-config)))
+
+;;; ----------------------------------------------------------------------
+;;; Chat logging paths.  Pure path logic; the writer (LOG-LINE) is in
+;;; frame.lisp, where the IRC-LINE accessors are in scope.
+;;; ----------------------------------------------------------------------
+
+(defvar *log-dir*
+  (merge-pathnames ".config/clatter-clim/logs/" (user-homedir-pathname))
+  "Root directory for per-buffer chat logs.")
+
+(defun %safe-log-name (string)
+  "Return STRING with characters unsafe in a path component replaced by _."
+  (map 'string
+       (lambda (c) (if (member c '(#\/ #\Null #\Newline #\Return #\Space)) #\_ c))
+       string))
+
+(defun buffer-log-path (server target)
+  "Pathname of the log file for buffer TARGET on SERVER."
+  (merge-pathnames (format nil "~A/~A.log"
+                           (%safe-log-name server) (%safe-log-name target))
+                   *log-dir*))

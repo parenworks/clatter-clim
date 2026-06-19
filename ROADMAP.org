@@ -25,7 +25,8 @@ This phase proves the bridge end to end.  Get it right before anything else.
 
 - [X] Click a nick to whois (:select) and to open a query (:describe): verify
       translators fire on CLX.
-- [ ] Click a channel name in a message to join it.
+- [X] Click a channel name in a message to join it (#channel tokens in
+      message text are IRC-CHANNEL presentations; click joins via com-join).
 - [X] Buffer list switches the current conversation on click.
 - [X] Type-to-say: bare text in the interactor sends to the current buffer
       instead of requiring the =Say= command name.
@@ -88,10 +89,24 @@ This phase proves the bridge end to end.  Get it right before anything else.
 
 * Phase 4: a real daily driver
 
-- [ ] IRCv3 niceties clatter-irc already provides: SASL on connect,
-      server-time on lines, message batches.
+- [X] Activity markers in the buffer list: per-buffer unread count and a ping
+      marker (=*=) for buffers that mentioned us, cleared on switch.  Nick
+      colouring and own-nick highlight were already in place.
+- [X] Timestamps (HH:MM) on every message and event line.
+- [X] Topic shown in the status bar, populated on join from clatter-irc's
+      stored channel-topic and updated on later TOPIC changes.
+- [X] Nick context menu (right-click a nick): Whois, Open query, Op, De-op,
+      Voice, De-voice, Kick, Ban, and client-side Ignore / unignore.
+- [X] Per-buffer logging to ~/.config/clatter-clim/logs/<server>/<buffer>.log,
+      capturing inbound and our own (non-echoed) lines, best-effort.
+- [X] Clickable, highlighted URLs in messages (a URL presentation; click opens
+      it in the system browser via xdg-open).  Channel mentions are likewise
+      clickable and coloured.
+- [X] Server numerics surfaced via on-numeric: WHOIS/WHOWAS replies render in
+      the current buffer; welcome/MOTD/lusers and other numerics go to the
+      server buffer; structural/noisy codes (ISUPPORT, topic, modes) are
+      skipped, NAMES still refreshes the nick list.
+- [ ] IRCv3 niceties clatter-irc already provides: server-time on lines,
+      message batches (SASL on connect is done).
 - [ ] Multiple servers / connections, one buffer list.
 - [ ] DCC chat and send surfaced as commands and presentations.
-- [ ] Persisted config (servers, autojoin) and logging via clatter-irc's
-      *log-function*.
-- [ ] Nick coloring, highlight on own nick, activity markers in the buffer list.

@@ -18,6 +18,10 @@
 (defparameter *colour-self*       (make-rgb-color 0.40 0.70 0.95))
 (defparameter *colour-highlight*  (make-rgb-color 0.98 0.85 0.45)
   "Ink for a line that mentions our own nick (the ping highlight).")
+(defparameter *colour-channel*    (make-rgb-color 0.45 0.80 0.95)
+  "Ink for clickable #channel mentions inside message text.")
+(defparameter *colour-url*        (make-rgb-color 0.55 0.85 0.65)
+  "Ink for clickable URLs inside message text.")
 
 ;;; Custom-drawn buttons (toolbar and dialogs).  These are presentations, not
 ;;; gadgets, so we own their shape, padding and hover entirely.
@@ -117,6 +121,67 @@ drawn so callers can lay buttons out in a row."
        (search (string-downcase nick) (string-downcase text))
        t))
 
+(defun channel-token-p (token)
+  "True if TOKEN looks like an IRC channel mention (a channel-prefix char
+followed by at least one more character)."
+  (and (>= (length token) 2)
+       (member (char token 0) '(#\# #\& #\+ #\!))))
+
+(defun url-token-p (token)
+  "True if TOKEN looks like an http or https URL."
+  (let ((n (length token)))
+    (or (and (>= n 7) (string-equal "http://" token :end2 7))
+        (and (>= n 8) (string-equal "https://" token :end2 8)))))
+
+(defun split-trailing-punctuation (token)
+  "Return (values CORE TAIL) splitting trailing sentence punctuation off TOKEN,
+so it is not swallowed into a URL or channel name.  At least one character is
+always kept in CORE."
+  (let ((core-end (length token)))
+    (loop while (and (> core-end 1)
+                     (find (char token (1- core-end)) ".,!?:;)]}\"'"))
+          do (decf core-end))
+    (values (subseq token 0 core-end) (subseq token core-end))))
+
+(defun present-token (pane token ptype ink default-ink)
+  "Present TOKEN as PTYPE in INK, writing any trailing punctuation as plain
+text in DEFAULT-INK."
+  (multiple-value-bind (core tail) (split-trailing-punctuation token)
+    (with-drawing-options (pane :ink ink)
+      (present core ptype :stream pane))
+    (when (plusp (length tail))
+      (with-drawing-options (pane :ink default-ink)
+        (write-string tail pane)))))
+
+(defun present-message-text (pane text default-ink)
+  "Write TEXT to PANE, presenting URLs and #channel tokens as clickable
+presentations (opened / joined on click) and the rest as plain text in
+DEFAULT-INK.  Whitespace runs are emitted verbatim so spacing is preserved."
+  (let ((start 0) (len (length text)))
+    (flet ((ws-p (c) (member c '(#\Space #\Tab))))
+      (loop while (< start len) do
+        ;; Emit any run of whitespace verbatim.
+        (let ((ws-end start))
+          (loop while (and (< ws-end len) (ws-p (char text ws-end))) do (incf ws-end))
+          (when (> ws-end start)
+            (with-drawing-options (pane :ink default-ink)
+              (write-string text pane :start start :end ws-end))
+            (setf start ws-end)))
+        (when (>= start len) (return))
+        ;; Consume the next whitespace-delimited token.
+        (let ((tok-end start))
+          (loop while (and (< tok-end len) (not (ws-p (char text tok-end)))) do (incf tok-end))
+          (let ((token (subseq text start tok-end)))
+            (cond
+              ((url-token-p token)
+               (present-token pane token 'url *colour-url* default-ink))
+              ((channel-token-p token)
+               (present-token pane token 'irc-channel *colour-channel* default-ink))
+              (t
+               (with-drawing-options (pane :ink default-ink)
+                 (write-string token pane)))))
+          (setf start tok-end))))))
+
 (define-application-frame clatter-clim ()
   ((connection   :initform nil :accessor app-connection)
    (buffers      :initform '() :accessor app-buffers)
@@ -125,7 +190,10 @@ drawn so callers can lay buttons out in a row."
    ;; MAILBOX-LOCK.  COM-DRAIN empties it on the frame thread.
    (mailbox      :initform '() :accessor app-mailbox)
    (mailbox-lock :initform (bt:make-lock "clatter-clim-mailbox")
-                 :reader app-mailbox-lock))
+                 :reader app-mailbox-lock)
+   ;; Client-side ignore list: lowercased bare nicks whose messages are
+   ;; dropped before they reach a buffer.  Mutated only on the frame thread.
+   (ignored      :initform '() :accessor app-ignored))
   (:menu-bar nil)
   (:top-level (default-frame-top-level :prompt "> "))
   (:panes
@@ -180,6 +248,55 @@ drawn so callers can lay buttons out in a row."
         (1/6 nick-list))
       input))))
 
+(defmethod (setf app-current) :after (buffer (frame clatter-clim))
+  "Selecting a buffer clears its unseen-activity markers."
+  (when buffer
+    (setf (buffer-unread buffer) 0
+          (buffer-ping buffer) nil)))
+
+(defun hhmm (universal)
+  "Format a universal time as a local HH:MM string."
+  (multiple-value-bind (s m h) (decode-universal-time (or universal (get-universal-time)))
+    (declare (ignore s))
+    (format nil "~2,'0D:~2,'0D" h m)))
+
+(defun format-log-line (line)
+  "Render an IRC-LINE as one timestamped text line for the on-disk log."
+  (multiple-value-bind (s m h d mo y)
+      (decode-universal-time (or (irc-line-time line) (get-universal-time)))
+    (let ((ts (format nil "~4,'0D-~2,'0D-~2,'0D ~2,'0D:~2,'0D:~2,'0D" y mo d h m s))
+          (nick (irc-line-nick line))
+          (text (irc-line-text line)))
+      (ecase (irc-line-kind line)
+        (:privmsg (format nil "~A <~A> ~A" ts nick text))
+        (:notice  (format nil "~A -~A- ~A" ts nick text))
+        ((:join :part :quit :topic :system) (format nil "~A -!- ~A" ts text))))))
+
+(defun log-line (frame target line)
+  "Append LINE to TARGET's on-disk log.  Best-effort: errors (a full disk, a
+bad path) are swallowed so logging never disturbs the UI."
+  (ignore-errors
+    (let* ((conn (app-connection frame))
+           (server (or (and conn (irc:connection-server conn)) "server"))
+           (path (buffer-log-path server target)))
+      (ensure-directories-exist path)
+      (with-open-file (s path :direction :output
+                              :if-exists :append :if-does-not-exist :create
+                              :external-format :utf-8)
+        (write-line (format-log-line line) s)))))
+
+(defun note-activity (frame buffer line)
+  "Mark BUFFER as having unseen activity when it is not the current buffer, so
+the buffer list can show an unread count and a ping marker.  Only message
+lines (privmsg/notice) count; join/part churn does not."
+  (when (and (not (eq buffer (app-current frame)))
+             (member (irc-line-kind line) '(:privmsg :notice)))
+    (incf (buffer-unread buffer))
+    (let ((me (let ((conn (app-connection frame)))
+                (and conn (irc:connection-nick conn)))))
+      (when (and me (mentions-p (irc-line-text line) me))
+        (setf (buffer-ping buffer) t)))))
+
 ;;; ----------------------------------------------------------------------
 ;;; Display functions.  Each reads the model and paints one pane.  They are
 ;;; backend-agnostic: identical code drives CLX, the terminal and the browser.
@@ -187,12 +304,19 @@ drawn so callers can lay buttons out in a row."
 
 (defun display-buffer-list (frame pane)
   (dolist (b (app-buffers frame))
-    (let ((current-p (eq b (app-current frame))))
+    (let* ((current-p (eq b (app-current frame)))
+           (unread (buffer-unread b))
+           (ping (buffer-ping b))
+           (ink (cond (current-p *colour-heading*)
+                      (ping *colour-highlight*)
+                      ((plusp unread) *colour-fg-default*)
+                      (t *colour-muted*)))
+           (badge (with-output-to-string (s)
+                    (when (plusp unread) (format s " (~D)" unread))
+                    (when ping (write-string " *" s)))))
       (with-output-as-presentation (pane b 'buffer)
-        (with-drawing-options (pane :ink (if current-p
-                                             *colour-heading*
-                                             *colour-fg-default*))
-          (format pane "~:[  ~;> ~]~A~%" current-p (buffer-name b)))))))
+        (with-drawing-options (pane :ink ink)
+          (format pane "~:[  ~;> ~]~A~A~%" current-p (buffer-name b) badge))))))
 
 (defun display-messages (frame pane)
   (let* ((b (app-current frame))
@@ -208,17 +332,18 @@ drawn so callers can lay buttons out in a row."
                   (ping (and me nick
                              (not (irc:nick-equal nick me))
                              (mentions-p text me))))
+             (with-drawing-options (pane :ink *colour-muted*)
+               (format pane "~A " (hhmm (irc-line-time line))))
              (write-string "<" pane)
              (with-drawing-options (pane :ink (nick-ink nick))
                (present nick 'nick :stream pane))
              (write-string "> " pane)
-             (if ping
-                 (with-drawing-options (pane :ink *colour-highlight*)
-                   (format pane "~A~%" text))
-                 (format pane "~A~%" text))))
+             (present-message-text pane text
+                                   (if ping *colour-highlight* *colour-fg-default*))
+             (terpri pane)))
           ((:join :part :quit :topic :system)
            (with-drawing-options (pane :ink *colour-muted*)
-             (format pane "-!- ~A~%" (irc-line-text line)))))))))
+             (format pane "~A -!- ~A~%" (hhmm (irc-line-time line)) (irc-line-text line)))))))))
 
 (defun display-nick-list (frame pane)
   (let ((b (app-current frame)))
