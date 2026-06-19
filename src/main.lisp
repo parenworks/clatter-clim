@@ -1,0 +1,49 @@
+;;;; main.lisp - entry points, one per backend
+;;;;
+;;;; The frame, panes, commands, presentations and bridge are identical for
+;;;; all three.  Only the port differs.  The terminal and web backends are
+;;;; loaded lazily so the core system stays free of those dependencies.
+
+(in-package #:clatter-clim)
+
+(defun %boot (&key (new-process t) make-frame)
+  "Run the frame returned by MAKE-FRAME, optionally in its own CLIM process."
+  (flet ((go () (run-frame-top-level (funcall make-frame))))
+    (if new-process
+        (clim-sys:make-process #'go :name "clatter-clim")
+        (go))))
+
+(defun run-native (&key (new-process t))
+  "Run on the default McCLIM backend (CLX, native X11/Wayland)."
+  (%boot :new-process new-process
+         :make-frame (lambda () (make-application-frame 'clatter-clim))))
+
+(defun run (&rest args)
+  "Default entry point: the native backend."
+  (apply #'run-native args))
+
+(defun run-terminal ()
+  "Run in the terminal via the mcclim-charmed backend.
+Loads :mcclim-charmed on demand."
+  (asdf:load-system :mcclim-charmed)
+  ;; clim-charmed:run-frame-on-charmed-with-interactor handles port lifecycle
+  ;; and terminal restoration; it expects an application-frame class name.
+  (uiop:symbol-call :clim-charmed :run-frame-on-charmed-with-interactor
+                    'clatter-clim))
+
+(defun run-web (&key (port 8080) (new-process t))
+  "Run in a browser tab via the clim-clog backend.
+Loads :clim-clog on demand.
+
+NOTE: clim-clog currently drives its own demo frame from a CLOG on-new-window
+boot function (clim-clog::start-frame).  Running an arbitrary frame class on
+it needs a small generic entry point on the clim-clog side; until that lands,
+this delegates to whatever clim-clog exposes and is the one Phase-3 seam.
+See ROADMAP.org."
+  (asdf:load-system :clim-clog)
+  (%boot :new-process new-process
+         :make-frame
+         (lambda ()
+           (let ((port (find-port :server-path (list :clog :port port))))
+             (make-application-frame 'clatter-clim
+                                     :frame-manager (first (climi::frame-managers port)))))))

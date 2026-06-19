@@ -1,0 +1,71 @@
+#+TITLE: clatter-clim roadmap
+#+OPTIONS: toc:nil num:nil
+
+Ordered so that the riskiest, most architecture-defining work is proven first.
+
+* Phase 0: it loads and connects (native)
+
+- [ ] =(asdf:load-system :clatter-clim)= compiles clean against McCLIM and clatter-irc.
+- [ ] =(clatter-clim:run)= opens the frame on CLX with all panes laid out.
+- [ ] =Connect= then =Join #commonlisp= shows the channel buffer.
+- [ ] Inbound PRIVMSG renders in the messages pane.
+
+This phase proves the bridge end to end.  Get it right before anything else.
+
+* Phase 1: the bridge, deliberately stress-tested
+
+- [ ] Confirm no pane is ever mutated off the frame thread (the only writer
+      from the IRC thread is the locked mailbox in bridge.lisp).
+- [ ] Flood test: join a busy channel, confirm no redisplay corruption and no
+      lost or reordered lines.
+- [ ] Batch drain: many messages arriving between frames coalesce into one
+      repaint (already the design; verify under load).
+
+* Phase 2: interaction polish
+
+- [ ] Click a nick to whois (:select) and to open a query (:describe): verify
+      translators fire on CLX.
+- [ ] Click a channel name in a message to join it.
+- [ ] Buffer list switches the current conversation on click.
+- [ ] Type-to-say: bare text in the interactor sends to the current buffer
+      instead of requiring the =Say= command name.
+- [ ] NAMES / nick-list population on join (handle the relevant numerics via
+      on-numeric, feeding :names updates).
+- [X] Connect and Disconnect toolbar buttons (push-button gadgets).
+- [X] SASL identify at connect time, and a Msg command for NickServ/ChanServ.
+
+* Phase 2b: config panel and config file
+
+- [ ] A connect/config dialog using =accepting-values=: fields for server,
+      port, nick, SASL password, and autojoin channels, with OK/Cancel.  It
+      pre-fills from the defaults (and later the config file).  Confirm it
+      renders on CLX, on charmed-mcclim (sequential prompts) and on clim-clog.
+- [ ] A persisted config file at ~/.config/clatter-clim/config.lisp (or a
+      plist conf): servers, nick, autojoin, SASL credentials.  Read at boot to
+      seed the defaults; credentials stored user-readable only.  The connect
+      dialog can save back to it.
+- [ ] Autojoin: on a successful connect, join the configured channels.
+
+* Phase 3: portability, the showcase
+
+- [ ] Load =:mcclim-charmed=, run the identical frame with
+      =(clatter-clim:run-terminal)=.  Confirm panes, presentations and command
+      prompting work in the terminal.
+- [ ] clim-clog entry point.  clim-clog today boots its own demo frame from a
+      CLOG on-new-window function (clim-clog::start-frame).  To run an
+      arbitrary frame class we need a small generic entry on the clim-clog
+      side, for example =clim-clog:run-frame= that takes a frame class and a
+      port, wiring the CLOG boot to find-port =(:clog ...)= and
+      make-application-frame.  =run-web= is written against that seam.
+- [ ] Demonstrate the same client running native, in a terminal and in a
+      browser from one image.
+
+* Phase 4: a real daily driver
+
+- [ ] IRCv3 niceties clatter-irc already provides: SASL on connect,
+      server-time on lines, message batches.
+- [ ] Multiple servers / connections, one buffer list.
+- [ ] DCC chat and send surfaced as commands and presentations.
+- [ ] Persisted config (servers, autojoin) and logging via clatter-irc's
+      *log-function*.
+- [ ] Nick coloring, highlight on own nick, activity markers in the buffer list.

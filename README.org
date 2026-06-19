@@ -1,0 +1,129 @@
+#+TITLE: clatter-clim
+#+OPTIONS: toc:2 num:nil
+
+A [[https://mcclim.common-lisp.dev/][McCLIM]] IRC client built on [[https://github.com/parenworks/clatter-irc][clatter-irc]].
+
+The application is written once against CLIM presentations and commands, and
+runs unchanged on three backends:
+
+| Backend                    | Surface                        | System          |
+|----------------------------+--------------------------------+-----------------|
+| stock McCLIM CLX           | native X11 or Wayland desktop  | =mcclim=        |
+| [[https://github.com/parenworks/charmed-mcclim][charmed-mcclim]]             | terminal, including over SSH   | =mcclim-charmed=|
+| [[https://github.com/parenworks/clim-clog][clim-clog]]                  | HTML5 canvas in a browser tab  | =clim-clog=     |
+
+The point of doing an IRC client in CLIM is that IRC is a command-driven medium
+with obvious nouns (nicks, channels, conversations), and CLIM is a
+command-driven user-interface toolkit with presentations and translators.
+Clicking a nick to run whois, clicking a channel to join, and switching buffers
+all fall out of the presentation system rather than being hand-wired per
+widget, and they work on every backend for free.
+
+* Status
+
+Early scaffold.  The architecture is in place: frame, panes, presentations,
+commands, and the IRC-thread to CLIM-thread bridge.  The first milestone is to
+load it, connect to Libera, join one channel, and watch messages render on the
+native backend, then prove the identical frame runs in the terminal and the
+browser.  See [[file:ROADMAP.org][ROADMAP.org]].
+
+* Architecture
+
+#+begin_example
+clatter-irc           IRC protocol: connection, hooks, commands (the model source)
+    |
+    v   (reader thread fires hooks)
+bridge.lisp           hooks push updates onto a locked mailbox, then poke the
+    |                 frame with EXECUTE-FRAME-COMMAND (thread-safe)
+    v   (frame thread)
+COM-DRAIN             drains the mailbox, mutates the view model, repaints
+    |
+    v
+frame.lisp            application frame + panes + display functions
+    |
+    v
+McCLIM backend        CLX, charmed-mcclim, or clim-clog
+#+end_example
+
+** The bridge (the important part)
+
+clatter-irc runs its socket on a background reader thread and fires hooks
+there.  McCLIM owns its own event loop on the frame thread, and panes must only
+be mutated and painted there.  The bridge never touches panes from the IRC
+thread.  Instead each hook:
+
+1. pushes a small update onto a lock-protected mailbox, then
+2. calls =clim:execute-frame-command= with the internal =com-drain= command.
+
+When =execute-frame-command= is called from a thread other than the frame's
+process it does not run inline: it enqueues an event on the frame's sheet event
+queue, which the frame thread processes in its normal loop.  =com-drain= then
+empties the mailbox and repaints, all on the frame thread.  This is portable
+across all three backends because they share that event queue.
+
+* Files
+
+#+begin_example
+clatter-clim.asd      system definition (core only; backends load on demand)
+src/package.lisp      package, local nicknames (irc = clatter-irc, bt = bordeaux-threads)
+src/model.lisp        plain view model: buffer, line; no CLIM, no clatter-irc
+src/presentations.lisp  nick, irc-channel, buffer presentation types
+src/frame.lisp        application frame, panes, display functions
+src/commands.lisp     CLIM commands + presentation-to-command translators
+src/bridge.lisp       IRC hooks -> mailbox -> com-drain -> model + repaint
+src/main.lisp         run / run-native / run-terminal / run-web
+#+end_example
+
+* Running
+
+Put this repo, =clatter-irc=, and (for the non-native backends)
+=charmed-mcclim= and =clim-clog= where ASDF can find them.
+
+#+begin_src lisp
+(asdf:load-system :clatter-clim)
+
+;; Native desktop (CLX).
+(clatter-clim:run)
+
+;; Terminal (loads :mcclim-charmed on demand).
+(clatter-clim:run-terminal)
+
+;; Browser (loads :clim-clog on demand; see ROADMAP for the Phase-3 seam).
+(clatter-clim:run-web :port 8080)
+#+end_src
+
+Then drive it with the Connect and Disconnect toolbar buttons, by typing
+commands in the interactor pane, or by clicking presented nicks and channels.
+Connect defaults to nick =parensmith= on =irc.libera.chat=, so a bare Connect
+(or a click of the Connect button) does not collide with an existing session.
+
+#+begin_example
+Connect                                  ; uses parensmith on irc.libera.chat
+Connect :nick parensmith :password hunter2  ; with SASL to services
+Join #commonlisp
+Say hello from clatter-clim
+Msg NickServ "identify hunter2"          ; talk to services directly
+Whois someone
+Disconnect
+Quit
+#+end_example
+
+Authentication to NickServ is done with SASL at connect time (the =password=
+argument), which avoids a plaintext IDENTIFY on the wire.  For ad hoc service
+commands, =Msg= sends a PRIVMSG to any target such as NickServ or ChanServ.
+
+A full connect/config dialog (an =accepting-values= panel) and a persisted
+config file are on the roadmap; defaults live in =*default-server*=,
+=*default-port*= and =*default-nick*= for now.
+
+* Dependencies
+
+- [[https://mcclim.common-lisp.dev/][McCLIM]] (=mcclim=)
+- [[https://github.com/parenworks/clatter-irc][clatter-irc]]
+- =bordeaux-threads=
+- For the terminal backend: [[https://github.com/parenworks/charmed-mcclim][charmed-mcclim]] (=mcclim-charmed=) and [[https://github.com/parenworks/charmed][charmed]]
+- For the web backend: [[https://github.com/parenworks/clim-clog][clim-clog]] and [[https://github.com/rabbibotton/clog][CLOG]]
+
+* License
+
+MIT.  See [[file:LICENSE][LICENSE]].
