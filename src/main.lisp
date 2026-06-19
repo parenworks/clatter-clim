@@ -16,10 +16,33 @@ does not have to depend on the truetype backend being present."
       (setf (symbol-value sym) "")
       t)))
 
+(defun %apply-dark-gadget-theme ()
+  "Recolour McCLIM's built-in 3D gadget chrome to match the dark palette.
+
+McCLIM draws scrollbars, button bevels and pane borders from four global
+greys (its \"Motif-ish\" defaults) in CLIM-INTERNALS.  They are DEFPARAMETERs and
+CLOS default-initargs re-read them per gadget, so overriding them before the
+frame is built restyles the otherwise grey 1985-era widgets.  Done by symbol
+lookup so the core does not hard-depend on these internals existing."
+  (flet ((set-grey (name value)
+           (let ((sym (find-symbol name "CLIM-INTERNALS")))
+             (when (and sym (boundp sym))
+               (setf (symbol-value sym) value)))))
+    (set-grey "*3D-NORMAL-COLOR*" (make-gray-color 0.22))   ; button face / thumb
+    (set-grey "*3D-LIGHT-COLOR*"  (make-gray-color 0.34))   ; top-left bevel
+    (set-grey "*3D-DARK-COLOR*"   (make-gray-color 0.08))   ; bottom-right bevel
+    (set-grey "*3D-INNER-COLOR*"  (make-gray-color 0.13))   ; scrollbar trough
+    ;; Slimmer scrollbars than the 16px Motif default; our custom HANDLE-REPAINT
+    ;; (frame.lisp) draws a thin rounded thumb within this width.
+    (let ((sym (find-symbol "*SCROLLBAR-THICKNESS*" "CLIM-INTERNALS")))
+      (when (and sym (boundp sym))
+        (setf (symbol-value sym) 12)))))
+
 (defun %boot (&key (new-process t) make-frame)
   "Run the frame returned by MAKE-FRAME, optionally in its own CLIM process.
 The font path must be limited before MAKE-FRAME creates the port."
   (%limit-font-path)
+  (%apply-dark-gadget-theme)
   (load-config)
   (flet ((launch () (run-frame-top-level (funcall make-frame))))
     (if new-process

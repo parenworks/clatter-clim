@@ -15,6 +15,7 @@
 (defvar *default-server* "irc.libera.chat")
 (defvar *default-port* 6697)
 (defvar *default-nick* "parensmith")
+(defvar *default-sasl-password* "")
 
 (defvar *config-path*
   (merge-pathnames ".config/clatter-clim/config.lisp" (user-homedir-pathname))
@@ -24,6 +25,9 @@
   (server "irc.libera.chat")
   (port 6697)
   (nick "parensmith")
+  ;; SASL password authenticates to services during registration.  Stored in
+  ;; the user-only-readable config file (see SAVE-CONFIG); empty means none.
+  (sasl-password "")
   (autojoin '()))
 
 (defvar *config* (make-config)
@@ -40,10 +44,12 @@ Then reflect server/port/nick into the connect defaults.  Returns *CONFIG*."
               (make-config :server (or (getf plist :server) "irc.libera.chat")
                            :port (or (getf plist :port) 6697)
                            :nick (or (getf plist :nick) "parensmith")
+                           :sasl-password (or (getf plist :sasl-password) "")
                            :autojoin (getf plist :autojoin))))))
   (setf *default-server* (config-server *config*)
         *default-port* (config-port *config*)
-        *default-nick* (config-nick *config*))
+        *default-nick* (config-nick *config*)
+        *default-sasl-password* (config-sasl-password *config*))
   *config*)
 
 (defun save-config (&optional (path *config-path*))
@@ -56,8 +62,11 @@ Then reflect server/port/nick into the connect defaults.  Returns *CONFIG*."
       (prin1 (list :server (config-server *config*)
                    :port (config-port *config*)
                    :nick (config-nick *config*)
+                   :sasl-password (config-sasl-password *config*)
                    :autojoin (config-autojoin *config*))
              s)))
+  ;; The file may hold a SASL password, so keep it readable by the owner only.
+  #+sbcl (ignore-errors (sb-posix:chmod path #o600))
   path)
 
 (defun config-add-autojoin (channel)

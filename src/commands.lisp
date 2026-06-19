@@ -10,26 +10,56 @@
 ;;; Connection lifecycle
 ;;; ----------------------------------------------------------------------
 
-(define-clatter-clim-command (com-connect :name "Connect")
-    (&key (server 'string :default *default-server*)
-          (nick 'string :default *default-nick*)
-          ;; A non-empty password authenticates to services via SASL PLAIN
-          ;; during registration, which is the preferred NickServ identify
-          ;; path (no plaintext IDENTIFY on the wire).
-          (password 'string :default ""))
-  (let* ((frame *application-frame*)
-         (use-sasl (plusp (length password)))
+(defun start-connection (frame server nick password)
+  "Open an IRC connection for FRAME to SERVER as NICK, authenticating via SASL
+PLAIN when PASSWORD is non-empty.  The connect runs off the UI thread so a slow
+TLS handshake never freezes the frame."
+  (let* ((use-sasl (plusp (length password)))
          (conn (irc:make-connection server nick :tls t
                                     :sasl-username (when use-sasl nick)
                                     :sasl-password (when use-sasl password))))
     (setf (app-connection frame) conn)
     (ensure-buffer frame server :server)
     (install-irc-hooks frame conn)
-    ;; clatter-irc spawns its own reader thread; do the connect off the UI
-    ;; thread so a slow TLS handshake never freezes the frame.
     (clim-sys:make-process (lambda () (irc:connect conn))
                            :name "clatter-irc-connect")
-    (redisplay-current frame)))
+    (redisplay-current frame)
+    conn))
+
+(define-clatter-clim-command (com-connect :name "Connect")
+    (&key (server 'string :default *default-server*)
+          (nick 'string :default *default-nick*)
+          ;; A non-empty password authenticates to services via SASL PLAIN
+          ;; during registration, which is the preferred NickServ identify
+          ;; path (no plaintext IDENTIFY on the wire).
+          (password 'string :default *default-sasl-password*))
+  (start-connection *application-frame* server nick password))
+
+;;; A connect/config dialog.  Edits the persisted config in place, saves it,
+;;; and connects with the chosen values.  Cancel leaves everything untouched.
+(define-clatter-clim-command (com-configure :name "Configure")
+    ()
+  (let* ((frame *application-frame*)
+         (result (run-config-dialog)))
+    (when result
+      (destructuring-bind (&key server port nick password autojoin) result
+        (let ((server   (string-trim '(#\Space #\Tab) server))
+              (nick     (string-trim '(#\Space #\Tab) nick))
+              ;; PORT comes back as a string from the text field; keep the
+              ;; current value if it is not a valid integer.
+              (port     (or (parse-integer port :junk-allowed t) (config-port *config*)))
+              (channels (split-channels autojoin)))
+          (setf (config-server *config*) server
+                (config-port *config*) port
+                (config-nick *config*) nick
+                (config-sasl-password *config*) password
+                (config-autojoin *config*) channels
+                *default-server* server
+                *default-port* port
+                *default-nick* nick
+                *default-sasl-password* password)
+          (save-config)
+          (start-connection frame server nick password))))))
 
 (define-clatter-clim-command (com-disconnect :name "Disconnect")
     (&key (message 'string :default "clatter-clim"))
@@ -149,4 +179,14 @@
 
 (define-presentation-to-command-translator buffer-to-switch
     (buffer com-switch-buffer clatter-clim :gesture :select :documentation "Switch")
+    (object) (list object))
+
+;;; Custom-drawn buttons (toolbar, dialogs): clicking a UI-BUTTON runs its
+;;; stored action thunk.  This command has no :name so it stays out of menus.
+(define-clatter-clim-command (com-invoke-button)
+    ((button 'ui-button))
+  (funcall (ui-button-action button)))
+
+(define-presentation-to-command-translator ui-button-click
+    (ui-button com-invoke-button clatter-clim :gesture :select :documentation "Activate")
     (object) (list object))

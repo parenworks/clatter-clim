@@ -5,10 +5,10 @@ Ordered so that the riskiest, most architecture-defining work is proven first.
 
 * Phase 0: it loads and connects (native)
 
-- [ ] =(asdf:load-system :clatter-clim)= compiles clean against McCLIM and clatter-irc.
-- [ ] =(clatter-clim:run)= opens the frame on CLX with all panes laid out.
-- [ ] =Connect= then =Join #commonlisp= shows the channel buffer.
-- [ ] Inbound PRIVMSG renders in the messages pane.
+- [X] =(asdf:load-system :clatter-clim)= compiles clean against McCLIM and clatter-irc.
+- [X] =(clatter-clim:run)= opens the frame on CLX with all panes laid out.
+- [X] =Connect= then =Join #commonlisp= shows the channel buffer.
+- [X] Inbound PRIVMSG renders in the messages pane.
 
 This phase proves the bridge end to end.  Get it right before anything else.
 
@@ -23,28 +23,54 @@ This phase proves the bridge end to end.  Get it right before anything else.
 
 * Phase 2: interaction polish
 
-- [ ] Click a nick to whois (:select) and to open a query (:describe): verify
+- [X] Click a nick to whois (:select) and to open a query (:describe): verify
       translators fire on CLX.
 - [ ] Click a channel name in a message to join it.
-- [ ] Buffer list switches the current conversation on click.
-- [ ] Type-to-say: bare text in the interactor sends to the current buffer
+- [X] Buffer list switches the current conversation on click.
+- [X] Type-to-say: bare text in the interactor sends to the current buffer
       instead of requiring the =Say= command name.
-- [ ] NAMES / nick-list population on join (handle the relevant numerics via
+- [X] NAMES / nick-list population on join (handle the relevant numerics via
       on-numeric, feeding :names updates).
 - [X] Connect and Disconnect toolbar buttons (push-button gadgets).
 - [X] SASL identify at connect time, and a Msg command for NickServ/ChanServ.
+- [X] TAB nick completion on the last word, common prefix on ambiguity.
+- [X] Per-nick colouring and self-mention highlight.
 
 * Phase 2b: config panel and config file
 
-- [ ] A connect/config dialog using =accepting-values=: fields for server,
+- [X] A connect/config dialog using =accepting-values=: fields for server,
       port, nick, SASL password, and autojoin channels, with OK/Cancel.  It
-      pre-fills from the defaults (and later the config file).  Confirm it
-      renders on CLX, on charmed-mcclim (sequential prompts) and on clim-clog.
-- [ ] A persisted config file at ~/.config/clatter-clim/config.lisp (or a
-      plist conf): servers, nick, autojoin, SASL credentials.  Read at boot to
-      seed the defaults; credentials stored user-readable only.  The connect
-      dialog can save back to it.
-- [ ] Autojoin: on a successful connect, join the configured channels.
+      pre-fills from the config file and saves back to it on OK.  Confirmed on
+      CLX; charmed-mcclim and clim-clog still to verify.
+- [X] A persisted config file at ~/.config/clatter-clim/config.lisp: server,
+      port, nick, autojoin, SASL password.  Read at boot to seed the defaults;
+      written user-readable only (chmod 600).  The connect dialog saves to it.
+- [X] Autojoin: on a successful connect, join the configured channels.
+
+* Phase 2c: UI modernization (custom presentation-drawn controls)
+
+- [X] Dark theme across all panes and dialogs, with no white flash on any
+      backend (explicit fore/background inks on every pane).
+- [X] Recolour McCLIM's built-in 3D gadget chrome by overriding the
+      =*3d-*-color*= specials at boot, so default widgets stop looking grey.
+- [X] Custom presentation-drawn toolbar buttons (Connect, Disconnect,
+      Configure): rounded, padded, with a blue hover via a
+      =highlight-presentation= method and a =ui-button= translator.
+- [X] Reuse the same =ui-button= control for the config dialog's OK/Cancel
+      (the dialog inherits the main command table so the translator applies).
+- [X] Replace the config dialog's =accepting-values= popup with a themed
+      custom frame, including an editable Port text field.
+- [X] Custom flat scrollbars: a =handle-repaint= on =scroll-bar-pane= draws a
+      subtle trough and a thin rounded thumb (12px), brighter while dragging,
+      with no arrow buttons.
+- [ ] RETURN TO: mask the SASL password field so it shows bullets instead of
+      plaintext.  McCLIM's =text-field= is a Drei editor with no echo-char, so
+      this needs either a custom Drei view that draws bullets while keeping the
+      real buffer value, or folding the password into the custom text-entry
+      field work below.
+- [ ] Custom presentation-drawn text-entry fields with our own cursor and
+      keystroke handling (replaces the Drei =text-field= gadgets), at which
+      point masking is trivial.
 
 * Phase 3: portability, the showcase
 

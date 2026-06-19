@@ -19,6 +19,79 @@
 (defparameter *colour-highlight*  (make-rgb-color 0.98 0.85 0.45)
   "Ink for a line that mentions our own nick (the ping highlight).")
 
+;;; Custom-drawn buttons (toolbar and dialogs).  These are presentations, not
+;;; gadgets, so we own their shape, padding and hover entirely.
+(defparameter *btn-bg*       (make-rgb-color 0.18 0.20 0.25))
+(defparameter *btn-bg-hover* (make-rgb-color 0.24 0.34 0.50))
+(defparameter *btn-fg*       *colour-fg-default*)
+(defparameter *btn-radius* 6)
+(defparameter *btn-pad-x* 14 "Horizontal padding between a button's text and its edge.")
+(defparameter *btn-height* 26)
+
+(defstruct (ui-button (:constructor make-ui-button (label action)))
+  "A clickable button: LABEL is drawn, ACTION is a thunk run on click."
+  (label "" :type string)
+  (action (constantly nil) :type function))
+
+(defun draw-ui-button (stream button x y &key (background *btn-bg*) (foreground *btn-fg*))
+  "Draw BUTTON as a rounded, padded box with its top-left at (X, Y), wrapped in
+a UI-BUTTON presentation so a translator can fire on click.  Returns the width
+drawn so callers can lay buttons out in a row."
+  (let* ((label (ui-button-label button))
+         (w (+ (text-size stream label) (* 2 *btn-pad-x*)))
+         (h *btn-height*))
+    ;; :SINGLE-BOX T makes McCLIM highlight the whole button via our
+    ;; HIGHLIGHT-PRESENTATION method, rather than drawing default boxes around
+    ;; the child rectangle and text records.
+    (with-output-as-presentation (stream button 'ui-button :single-box t)
+      (clime:draw-rounded-rectangle* stream x y (+ x w) (+ y h)
+                                     :radius *btn-radius* :filled t :ink background)
+      (draw-text* stream label (+ x (/ w 2)) (+ y (/ h 2))
+                  :align-x :center :align-y :center :ink foreground))
+    w))
+
+(define-presentation-method highlight-presentation
+    ((type ui-button) record stream state)
+  ;; On hover, repaint the button with the brighter background; un-highlight is
+  ;; handled by McCLIM repainting the region, which redraws the normal button.
+  (when (eql state :highlight)
+    (let ((button (presentation-object record)))
+      (with-bounding-rectangle* (x1 y1 x2 y2) record
+        (clime:draw-rounded-rectangle* stream x1 y1 x2 y2
+                                       :radius *btn-radius* :filled t :ink *btn-bg-hover*)
+        (draw-text* stream (ui-button-label button)
+                    (/ (+ x1 x2) 2) (/ (+ y1 y2) 2)
+                    :align-x :center :align-y :center :ink *btn-fg*)))))
+
+;;; Flat, modern scrollbars.  McCLIM's default scroll-bar-pane draws a 3D Motif
+;;; trough with arrow buttons; we replace its HANDLE-REPAINT with a subtle
+;;; trough and a thin rounded thumb (brighter while dragging).  This overrides
+;;; the method for every scroll bar in the image, which is what we want.
+(defparameter *scrollbar-trough*       (make-rgb-color 0.11 0.12 0.14))
+(defparameter *scrollbar-thumb*        (make-rgb-color 0.30 0.32 0.38))
+(defparameter *scrollbar-thumb-active* *btn-bg-hover*)
+
+(defmethod handle-repaint ((pane climi::scroll-bar-pane) region)
+  (declare (ignore region))
+  (let ((trans (climi::scroll-bar-transformation pane)))
+    (with-drawing-options (pane :transformation trans)
+      ;; The thumb geometry helpers all work in this transformed ("always
+      ;; vertical") space, so we draw in it too.
+      (with-bounding-rectangle* (tx1 ty1 tx2 ty2)
+          (transform-region trans (climi::pane-inner-region pane))
+        (draw-rectangle* pane tx1 ty1 tx2 ty2 :ink *scrollbar-trough*)
+        (with-bounding-rectangle* (x1 y1 x2 y2) (climi::scroll-bar-thumb-region pane)
+          (declare (ignore x1 x2))
+          (let ((inset  (max 2 (floor (- tx2 tx1) 4)))
+                (active (eq (slot-value pane 'climi::event-state) :dragging)))
+            (clime:draw-rounded-rectangle* pane
+                                           (+ tx1 inset) (+ y1 1)
+                                           (- tx2 inset) (- y2 1)
+                                           :radius 4 :filled t
+                                           :ink (if active
+                                                    *scrollbar-thumb-active*
+                                                    *scrollbar-thumb*))))))))
+
 ;;; Per-nick colouring: each speaker keeps a stable colour, hashed from the
 ;;; bare nick (mode prefixes such as @ and + stripped so an op and a regular
 ;;; speaker map to the same colour).
@@ -65,7 +138,7 @@
    (messages    :application
                 :display-function 'display-messages
                 :incremental-redisplay t
-                :scroll-bars t
+                :scroll-bars :vertical
                 :end-of-line-action :wrap*
                 :foreground *colour-fg-default*
                 :background *colour-bg-main*)
@@ -85,36 +158,20 @@
                 :height 72 :min-height 48 :max-height 96
                 :foreground *colour-fg-default*
                 :background *colour-bg-header*)
-   ;; Toolbar gadgets.  pane-frame recovers the frame inside the callback,
-   ;; which runs on the frame thread; the commands default their arguments
-   ;; (see commands.lisp) so a bare click connects as *default-nick*.
-   (connect-button
-    (make-pane 'push-button
-               :label "Connect"
-               :foreground *colour-fg-default*
-               :background *colour-bg-header*
-               :width 120 :max-width 160 :height 28 :max-height 28
-               ;; Call the command directly on the frame thread.  We cannot go
-               ;; through execute-frame-command here: the free-form input model
-               ;; blocks in ACCEPT, so a queued command would not run until the
-               ;; next Return.  The callback already runs on the frame thread.
-               :activate-callback
-               (lambda (g) (let ((*application-frame* (pane-frame g))) (com-connect)))))
-   (disconnect-button
-    (make-pane 'push-button
-               :label "Disconnect"
-               :foreground *colour-fg-default*
-               :background *colour-bg-header*
-               :width 120 :max-width 160 :height 28 :max-height 28
-               :activate-callback
-               (lambda (g) (let ((*application-frame* (pane-frame g))) (com-disconnect))))))
+   ;; A custom-drawn toolbar: DISPLAY-TOOLBAR paints UI-BUTTON presentations,
+   ;; and the TOOLBAR-CLICK translator (commands.lisp) runs the clicked
+   ;; button's action.  Clicks are caught by the same input context that
+   ;; handles nick/buffer clicks, so no gadget callbacks are needed.
+   (toolbar     :application
+                :display-function 'display-toolbar
+                :scroll-bars nil
+                :height 38 :min-height 38 :max-height 38
+                :foreground *colour-fg-default*
+                :background *colour-bg-main*))
   (:layouts
    (default
     (vertically ()
-      (horizontally ()
-        connect-button
-        disconnect-button
-        +fill+)
+      toolbar
       (horizontally ()
         (1/6 buffer-list)
         (2/3 (vertically ()
@@ -179,6 +236,15 @@
             (if connected (irc:connection-nick conn) "(disconnected)")
             (if b (buffer-name b) "(no buffer)")
             (if b (buffer-topic b) ""))))
+
+(defun display-toolbar (frame pane)
+  "Paint the toolbar buttons in a left-aligned row."
+  (declare (ignore frame))
+  (let ((x 8) (y 6) (gap 8))
+    (dolist (button (list (make-ui-button "Connect"    (lambda () (com-connect)))
+                          (make-ui-button "Disconnect" (lambda () (com-disconnect)))
+                          (make-ui-button "Configure"  (lambda () (com-configure)))))
+      (incf x (+ (draw-ui-button pane button x y) gap)))))
 
 (defun redisplay-current (frame)
   "Force a repaint of every model-backed pane on the frame thread."
@@ -323,3 +389,105 @@ completion on the last token."
           ((char= (char line 0) #\/) (parse-slash-command frame (subseq line 1)))
           (t (list 'com-say line))))
     (command object)))
+
+;;; ----------------------------------------------------------------------
+;;; Connect / config dialog.
+;;;
+;;; A small themed application frame rather than ACCEPTING-VALUES: the latter's
+;;; own-window is stubbornly light and cannot be recoloured, and its INTEGER
+;;; field is not an editable box.  Here every pane carries the dark palette and
+;;; Port is a real text field.
+;;; ----------------------------------------------------------------------
+
+(defun split-channels (string)
+  "Split STRING on whitespace or commas into a list of non-empty channel names."
+  (flet ((sep-p (c) (member c '(#\Space #\Tab #\Newline #\Return #\,))))
+    (let ((result '()) (start nil) (len (length string)))
+      (dotimes (i len)
+        (if (sep-p (char string i))
+            (when start (push (subseq string start i) result) (setf start nil))
+            (unless start (setf start i))))
+      (when start (push (subseq string start) result))
+      (nreverse result))))
+
+(defun config-dialog-label (text)
+  "A right-padded label pane in the dialog's palette."
+  (make-pane 'label-pane :label text
+                         :align-x :right
+                         :foreground *colour-fg-default*
+                         :background *colour-bg-main*))
+
+(defun config-dialog-commit (acceptedp)
+  "Action thunk for the dialog's OK/Cancel UI-BUTTONs.  Runs inside
+COM-INVOKE-BUTTON, so *APPLICATION-FRAME* is the dialog.  On accept, snapshot
+the field values into the frame's RESULT slot; either way exit the dialog."
+  (let ((frame *application-frame*))
+    (when acceptedp
+      (flet ((val (name) (gadget-value (find-pane-named frame name))))
+        (setf (config-dialog-result frame)
+              (list :server (val 'server-field)
+                    :port (val 'port-field)
+                    :nick (val 'nick-field)
+                    :password (val 'pass-field)
+                    :autojoin (val 'autojoin-field)))))
+    (frame-exit frame)))
+
+(defun display-config-buttons (frame pane)
+  "Paint the dialog's OK/Cancel buttons as custom UI-BUTTONs."
+  (declare (ignore frame))
+  (let ((x 8) (y 7) (gap 8))
+    (dolist (button (list (make-ui-button "OK"     (lambda () (config-dialog-commit t)))
+                          (make-ui-button "Cancel" (lambda () (config-dialog-commit nil)))))
+      (incf x (+ (draw-ui-button pane button x y) gap)))))
+
+(define-application-frame config-dialog ()
+  ((result :initform nil :accessor config-dialog-result))
+  (:menu-bar nil)
+  ;; Inherit the main command table so the UI-BUTTON-CLICK translator and
+  ;; COM-INVOKE-BUTTON apply here, letting OK/Cancel be custom presentations.
+  (:command-table (config-dialog :inherit-from (clatter-clim)))
+  (:panes
+   (server-field   (make-pane 'text-field :value (config-server *config*)
+                                           :foreground *colour-fg-default*
+                                           :background *colour-bg-accent*))
+   (port-field     (make-pane 'text-field
+                              :value (princ-to-string (config-port *config*))
+                              :foreground *colour-fg-default*
+                              :background *colour-bg-accent*))
+   (nick-field     (make-pane 'text-field :value (config-nick *config*)
+                                           :foreground *colour-fg-default*
+                                           :background *colour-bg-accent*))
+   (pass-field     (make-pane 'text-field :value (config-sasl-password *config*)
+                                           :foreground *colour-fg-default*
+                                           :background *colour-bg-accent*))
+   (autojoin-field (make-pane 'text-editor
+                              :value (format nil "~{~A~^ ~}" (config-autojoin *config*))
+                              :ncolumns 40 :nlines 3
+                              :foreground *colour-fg-default*
+                              :background *colour-bg-accent*))
+   (buttons        :application
+                   :display-function 'display-config-buttons
+                   :scroll-bars nil
+                   :height 40 :min-height 40 :max-height 40
+                   :foreground *colour-fg-default*
+                   :background *colour-bg-main*))
+  (:layouts
+   (default
+    (vertically (:spacing 10 :background *colour-bg-main*)
+      (tabling (:spacing 8 :background *colour-bg-main*)
+        (list (config-dialog-label "Server")            server-field)
+        (list (config-dialog-label "Port")              port-field)
+        (list (config-dialog-label "Nick")              nick-field)
+        (list (config-dialog-label "SASL password")     pass-field)
+        (list (config-dialog-label "Autojoin channels") autojoin-field))
+      buttons))))
+
+(defun run-config-dialog ()
+  "Open the themed config dialog modally on the calling frame's port.  Returns
+the result plist on OK, or NIL if the user cancelled."
+  (let ((frame (make-application-frame 'config-dialog
+                                       :frame-manager (frame-manager *application-frame*)
+                                       :pretty-name "Connect / Configure"
+                                       :width 560 :height 320)))
+    (run-frame-top-level frame)
+    (config-dialog-result frame)))

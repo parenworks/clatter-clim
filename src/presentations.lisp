@@ -17,6 +17,11 @@
 (define-presentation-type buffer ()
   :description "a conversation buffer")
 
+;;; A custom-drawn clickable button.  The presentation object is a UI-BUTTON
+;;; struct (see frame.lisp); clicking runs its action via a translator.
+(define-presentation-type ui-button ()
+  :description "a button")
+
 (define-presentation-method present (object (type buffer) stream view &key)
   (declare (ignore view))
   (format stream "~A" (buffer-name object)))
