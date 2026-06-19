@@ -6,7 +6,7 @@
 
 (in-package #:clatter-clim)
 
-(defstruct (line (:constructor make-line (kind nick text &optional (time (get-universal-time)))))
+(defstruct (irc-line (:constructor make-irc-line (kind nick text &optional (time (get-universal-time)))))
   "One rendered row in a buffer.  KIND is one of :privmsg :notice :system
 :join :part :quit :topic.  NICK may be NIL for system rows."
   kind

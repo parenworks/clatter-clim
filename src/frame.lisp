@@ -10,6 +10,18 @@
 (defvar *default-port* 6697)
 (defvar *default-nick* "parensmith")
 
+;;; Dark theme palette, modelled on quaestor.  Every pane is given an
+;;; explicit foreground and background so there is no white flash-bang on
+;;; any backend; display functions draw with these inks rather than the
+;;; default black-on-white.
+(defparameter *colour-bg-main*    (make-rgb-color 0.11 0.12 0.14))
+(defparameter *colour-bg-accent* (make-rgb-color 0.13 0.14 0.17))
+(defparameter *colour-bg-header* (make-rgb-color 0.15 0.16 0.19))
+(defparameter *colour-fg-default* (make-rgb-color 0.85 0.87 0.90))
+(defparameter *colour-heading*    (make-rgb-color 0.65 0.75 0.90))
+(defparameter *colour-muted*      (make-rgb-color 0.50 0.52 0.56))
+(defparameter *colour-self*       (make-rgb-color 0.40 0.70 0.95))
+
 (define-application-frame clatter-clim ()
   ((connection   :initform nil :accessor app-connection)
    (buffers      :initform '() :accessor app-buffers)
@@ -24,33 +36,47 @@
    (buffer-list :application
                 :display-function 'display-buffer-list
                 :scroll-bars :vertical
-                :end-of-line-action :allow)
+                :end-of-line-action :allow
+                :foreground *colour-fg-default*
+                :background *colour-bg-accent*)
    (messages    :application
                 :display-function 'display-messages
                 :incremental-redisplay t
                 :scroll-bars t
-                :end-of-line-action :wrap*)
+                :end-of-line-action :wrap*
+                :foreground *colour-fg-default*
+                :background *colour-bg-main*)
    (nick-list   :application
                 :display-function 'display-nick-list
-                :scroll-bars :vertical)
+                :scroll-bars :vertical
+                :foreground *colour-fg-default*
+                :background *colour-bg-accent*)
    (status      :application
                 :display-function 'display-status
                 :scroll-bars nil
-                :height 22)
+                :height 22
+                :foreground *colour-fg-default*
+                :background *colour-bg-header*)
    (input       :interactor
                 :scroll-bars nil
-                :height 44)
+                :height 44
+                :foreground *colour-fg-default*
+                :background *colour-bg-header*)
    ;; Toolbar gadgets.  pane-frame recovers the frame inside the callback,
    ;; which runs on the frame thread; the commands default their arguments
    ;; (see commands.lisp) so a bare click connects as *default-nick*.
    (connect-button
     (make-pane 'push-button
                :label "Connect"
+               :foreground *colour-fg-default*
+               :background *colour-bg-header*
                :activate-callback
                (lambda (g) (execute-frame-command (pane-frame g) (list 'com-connect)))))
    (disconnect-button
     (make-pane 'push-button
                :label "Disconnect"
+               :foreground *colour-fg-default*
+               :background *colour-bg-header*
                :activate-callback
                (lambda (g) (execute-frame-command (pane-frame g) (list 'com-disconnect))))))
   (:layouts
@@ -77,22 +103,23 @@
     (let ((current-p (eq b (app-current frame))))
       (with-output-as-presentation (pane b 'buffer)
         (with-drawing-options (pane :ink (if current-p
-                                             +royalblue+
-                                             +foreground-ink+))
+                                             *colour-heading*
+                                             *colour-fg-default*))
           (format pane "~:[  ~;> ~]~A~%" current-p (buffer-name b)))))))
 
 (defun display-messages (frame pane)
   (let ((b (app-current frame)))
     (when b
       (loop for line across (buffer-lines b) do
-        (ecase (line-kind line)
+        (ecase (irc-line-kind line)
           ((:privmsg :notice)
            (write-string "<" pane)
-           (present (line-nick line) 'nick :stream pane)
-           (format pane "> ~A~%" (line-text line)))
+           (with-drawing-options (pane :ink *colour-self*)
+             (present (irc-line-nick line) 'nick :stream pane))
+           (format pane "> ~A~%" (irc-line-text line)))
           ((:join :part :quit :topic :system)
-           (with-drawing-options (pane :ink +gray50+)
-             (format pane "-!- ~A~%" (line-text line)))))))))
+           (with-drawing-options (pane :ink *colour-muted*)
+             (format pane "-!- ~A~%" (irc-line-text line)))))))))
 
 (defun display-nick-list (frame pane)
   (let ((b (app-current frame)))

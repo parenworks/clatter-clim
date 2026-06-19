@@ -64,18 +64,18 @@ UPDATE is a list whose head is a keyword (see APPLY-UPDATE)."
       (:system
        (destructuring-bind (target text) args
          (buffer-add-line (ensure-buffer frame target :server)
-                          (make-line :system nil text))))
+                          (make-irc-line :system nil text))))
       (:join
        (destructuring-bind (channel nick) args
          (let ((b (ensure-buffer frame channel :channel)))
            (pushnew nick (buffer-users b) :test #'string-equal)
-           (buffer-add-line b (make-line :join nick (format nil "~A has joined" nick))))))
+           (buffer-add-line b (make-irc-line :join nick (format nil "~A has joined" nick))))))
       (:part
        (destructuring-bind (channel nick reason) args
          (let ((b (ensure-buffer frame channel :channel)))
            (setf (buffer-users b)
                  (remove nick (buffer-users b) :test #'string-equal))
-           (buffer-add-line b (make-line :part nick
+           (buffer-add-line b (make-irc-line :part nick
                                          (format nil "~A has left~@[ (~A)~]" nick reason))))))
       (:topic
        (destructuring-bind (channel text) args
@@ -102,12 +102,12 @@ The hook lambda lists match the signatures documented in clatter-irc."
         (declare (ignore c msg))
         ;; A message to us (target = our nick) opens a query keyed by sender.
         (let ((buf (if (irc:channel-name-p target) target sender)))
-          (post-update frame (list :line buf (make-line :privmsg sender text))))))
+          (post-update frame (list :line buf (make-irc-line :privmsg sender text))))))
     (irc:add-hook conn 'irc:on-notice
       (lambda (c msg sender target text)
         (declare (ignore c msg))
         (let ((buf (if (irc:channel-name-p target) target (server-name))))
-          (post-update frame (list :line buf (make-line :notice sender text))))))
+          (post-update frame (list :line buf (make-irc-line :notice sender text))))))
     (irc:add-hook conn 'irc:on-join
       (lambda (c msg nick channel)
         (declare (ignore c msg))

@@ -6,12 +6,24 @@
 
 (in-package #:clatter-clim)
 
+(defun %limit-font-path ()
+  "Stop McCLIM from scanning every system TrueType font at startup.
+Per jackdaniel: set mcclim-truetype:*truetype-font-path* to the empty string
+before any port is initialised.  Done by symbol lookup so the core system
+does not have to depend on the truetype backend being present."
+  (let ((sym (find-symbol "*TRUETYPE-FONT-PATH*" "MCCLIM-TRUETYPE")))
+    (when (and sym (boundp sym))
+      (setf (symbol-value sym) "")
+      t)))
+
 (defun %boot (&key (new-process t) make-frame)
-  "Run the frame returned by MAKE-FRAME, optionally in its own CLIM process."
-  (flet ((go () (run-frame-top-level (funcall make-frame))))
+  "Run the frame returned by MAKE-FRAME, optionally in its own CLIM process.
+The font path must be limited before MAKE-FRAME creates the port."
+  (%limit-font-path)
+  (flet ((launch () (run-frame-top-level (funcall make-frame))))
     (if new-process
-        (clim-sys:make-process #'go :name "clatter-clim")
-        (go))))
+        (clim-sys:make-process #'launch :name "clatter-clim")
+        (launch))))
 
 (defun run-native (&key (new-process t))
   "Run on the default McCLIM backend (CLX, native X11/Wayland)."
@@ -22,10 +34,17 @@
   "Default entry point: the native backend."
   (apply #'run-native args))
 
+(defun main ()
+  "Toplevel for the built binary: run on the native backend in the
+foreground so the image stays alive until the frame exits."
+  (run-native :new-process nil)
+  (uiop:quit 0))
+
 (defun run-terminal ()
   "Run in the terminal via the mcclim-charmed backend.
 Loads :mcclim-charmed on demand."
   (asdf:load-system :mcclim-charmed)
+  (%limit-font-path)
   ;; clim-charmed:run-frame-on-charmed-with-interactor handles port lifecycle
   ;; and terminal restoration; it expects an application-frame class name.
   (uiop:symbol-call :clim-charmed :run-frame-on-charmed-with-interactor

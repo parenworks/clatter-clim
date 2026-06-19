@@ -91,7 +91,7 @@
          (b (app-current frame)))
     (when (and conn b (buffer-target-p b))
       (irc:privmsg conn (buffer-name b) text)
-      (buffer-add-line b (make-line :privmsg (irc:connection-nick conn) text))
+      (buffer-add-line b (make-irc-line :privmsg (irc:connection-nick conn) text))
       (redisplay-current frame))))
 
 ;;; Internal command with no command-line name: this is the wake-up that the

@@ -9,6 +9,7 @@
                     (#:bt  #:bordeaux-threads))
   (:documentation "A McCLIM IRC client front-end built on clatter-irc.")
   (:export #:clatter-clim
+           #:main
            #:run
            #:run-native
            #:run-terminal
