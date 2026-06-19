@@ -1,0 +1,13 @@
+# Build artifacts
+/bin/
+
+# Common Lisp compiled output
+*.fasl
+*.fas
+*.lx64fsl
+*.abcl
+
+# Editor and OS noise
+*~
+\#*\#
+.DS_Store
