@@ -12,15 +12,19 @@
 
 (defun start-connection (frame server nick password)
   "Open an IRC connection for FRAME to SERVER as NICK, authenticating via SASL
-PLAIN when PASSWORD is non-empty.  The connect runs off the UI thread so a slow
-TLS handshake never freezes the frame."
+PLAIN when PASSWORD is non-empty.  Each call adds a new NETWORK, so connecting
+to a second server simply opens another set of buffers in the same list.  The
+connect runs off the UI thread so a slow TLS handshake never freezes the frame."
   (let* ((use-sasl (plusp (length password)))
          (conn (irc:make-connection server nick :tls t
                                     :sasl-username (when use-sasl nick)
-                                    :sasl-password (when use-sasl password))))
-    (setf (app-connection frame) conn)
-    (ensure-buffer frame server :server)
-    (install-irc-hooks frame conn)
+                                    :sasl-password (when use-sasl password)))
+         (network (make-instance 'network :connection conn :label server)))
+    (setf (app-networks frame) (append (app-networks frame) (list network)))
+    ;; Switch to the new server buffer so the user sees the network they just
+    ;; opened, even when other networks are already present.
+    (setf (app-current frame) (ensure-buffer frame network server :server))
+    (install-irc-hooks frame network)
     (clim-sys:make-process (lambda () (irc:connect conn))
                            :name "clatter-irc-connect")
     (redisplay-current frame)
@@ -73,10 +77,13 @@ TLS handshake never freezes the frame."
 
 (define-clatter-clim-command (com-quit :name "Quit")
     (&key (message 'string :default "clatter-clim"))
-  (let* ((frame *application-frame*) (conn (app-connection frame)))
-    (when conn
-      (setf (irc:connection-reconnect-enabled conn) nil)
-      (ignore-errors (irc:quit conn message)))
+  ;; Quitting the client closes every open network, not just the current one.
+  (let ((frame *application-frame*))
+    (dolist (net (app-networks frame))
+      (let ((conn (network-connection net)))
+        (when conn
+          (setf (irc:connection-reconnect-enabled conn) nil)
+          (ignore-errors (irc:quit conn message)))))
     (frame-exit frame)))
 
 ;;; Send a PRIVMSG to any target.  This is the path to services such as
@@ -92,10 +99,12 @@ TLS handshake never freezes the frame."
 
 (define-clatter-clim-command (com-join :name "Join")
     ((channel 'irc-channel))
-  (let* ((frame *application-frame*) (conn (app-connection frame)))
+  (let* ((frame *application-frame*)
+         (network (current-network frame))
+         (conn (app-connection frame)))
     (when conn
       (irc:join conn channel)
-      (setf (app-current frame) (ensure-buffer frame channel :channel))
+      (setf (app-current frame) (ensure-buffer frame network channel :channel))
       (redisplay-current frame))))
 
 (define-clatter-clim-command (com-part :name "Part")
@@ -121,9 +130,10 @@ TLS handshake never freezes the frame."
 
 (define-clatter-clim-command (com-query :name "Query")
     ((who 'nick))
-  (let ((frame *application-frame*))
-    (setf (app-current frame) (ensure-buffer frame who :query))
-    (redisplay-current frame)))
+  (let* ((frame *application-frame*) (network (current-network frame)))
+    (when network
+      (setf (app-current frame) (ensure-buffer frame network who :query))
+      (redisplay-current frame))))
 
 (define-clatter-clim-command (com-switch-buffer :name "Switch Buffer")
     ((buffer 'buffer))
@@ -134,18 +144,29 @@ TLS handshake never freezes the frame."
 (define-clatter-clim-command (com-say :name "Say")
     ((text 'string))
   (let* ((frame *application-frame*)
-         (conn (app-connection frame))
          (b (app-current frame)))
-    (when (and conn b (buffer-target-p b))
-      (irc:privmsg conn (buffer-name b) text)
-      ;; With echo-message active, the server echoes our own PRIVMSG back and
-      ;; on-privmsg renders it; echoing locally too would double it.  Only
-      ;; echo locally when the server will not.
-      (unless (irc:cap-enabled-p conn "echo-message")
-        (let ((line (make-irc-line :privmsg (irc:connection-nick conn) text)))
-          (buffer-add-line b line)
-          (log-line frame (buffer-name b) line))
-        (redisplay-current frame)))))
+    (cond
+      ;; A DCC chat buffer sends over its direct connection, not the server.
+      ;; DCC has no server echo, so we always render our own line locally.
+      ((and b (eq (buffer-kind b) :dcc) (buffer-dcc b))
+       (ignore-errors (irc:dcc-chat-send (buffer-dcc b) text))
+       (let ((me (let ((net (buffer-network b)))
+                   (and net (network-connection net)
+                        (irc:connection-nick (network-connection net))))))
+         (buffer-add-line b (make-irc-line :privmsg (or me "me") text)))
+       (redisplay-current frame))
+      (t
+       (let ((conn (app-connection frame)))
+         (when (and conn b (buffer-target-p b))
+           (irc:privmsg conn (buffer-name b) text)
+           ;; With echo-message active, the server echoes our own PRIVMSG back
+           ;; and on-privmsg renders it; echoing locally too would double it.
+           ;; Only echo locally when the server will not.
+           (unless (irc:cap-enabled-p conn "echo-message")
+             (let ((line (make-irc-line :privmsg (irc:connection-nick conn) text)))
+               (buffer-add-line b line)
+               (log-line frame (buffer-network b) (buffer-name b) line))
+             (redisplay-current frame))))))))
 
 (define-clatter-clim-command (com-nick :name "Nick")
     ((new-nick 'string))
@@ -164,7 +185,7 @@ TLS handshake never freezes the frame."
                                    (format nil "* ~A ~A"
                                            (irc:connection-nick conn) action))))
           (buffer-add-line b line)
-          (log-line frame (buffer-name b) line))
+          (log-line frame (buffer-network b) (buffer-name b) line))
         (redisplay-current frame)))))
 
 ;;; Internal: print a client-side note into the current buffer (no name, not
@@ -175,6 +196,119 @@ TLS handshake never freezes the frame."
     (when b
       (buffer-add-line b (make-irc-line :system nil text))
       (redisplay-current frame))))
+
+;;; ----------------------------------------------------------------------
+;;; DCC: direct client-to-client chat and file transfer.  clatter-irc owns the
+;;; transport (the dcc-manager and its connection threads); here we surface it
+;;; as commands, a clickable offer presentation, and a :dcc chat buffer.
+;;; ----------------------------------------------------------------------
+
+(defun network-dcc (network)
+  "The DCC manager for NETWORK, created on first use."
+  (or (network-dcc-manager network)
+      (setf (network-dcc-manager network)
+            (irc:make-dcc-manager (network-connection network)))))
+
+(defun dcc-buffer-name (nick)
+  "Buffer name for a DCC chat with NICK.  The leading '=' keeps it distinct
+from a same-named query or channel buffer (the classic DCC convention)."
+  (format nil "=~A" nick))
+
+(defun find-dcc (network id)
+  "The DCC connection with numeric ID on NETWORK, or NIL."
+  (let ((mgr (network-dcc-manager network)))
+    (and mgr (find id (irc:dcc-list mgr) :key #'irc:dcc-connection-id))))
+
+(defun open-dcc-buffer (frame network chat)
+  "Ensure and select the :dcc buffer for CHAT's peer, wiring CHAT so its inbound
+lines post to that buffer.  Frame thread only."
+  (let* ((nick (irc:dcc-connection-nick chat))
+         (b (ensure-buffer frame network (dcc-buffer-name nick) :dcc)))
+    (setf (buffer-dcc b) chat
+          ;; The callback runs on the DCC reader thread, so it only posts to the
+          ;; mailbox; the bridge mutates the buffer on the frame thread.
+          (irc:dcc-chat-on-message chat)
+          (lambda (c line)
+            (declare (ignore c))
+            (post-update frame (list :dcc-chat-line network chat line))))
+    (setf (app-current frame) b)
+    b))
+
+(defun %dcc-accept (frame network connection)
+  "Accept the pending DCC CONNECTION on NETWORK.  A chat opens its buffer first
+so the first inbound line has somewhere to land."
+  (when (and network connection)
+    (when (typep connection 'irc:dcc-chat)
+      (open-dcc-buffer frame network connection))
+    (irc:dcc-accept (network-dcc network) (irc:dcc-connection-id connection))
+    (com-note (format nil "DCC #~A accepted" (irc:dcc-connection-id connection)))
+    (redisplay-current frame)))
+
+(defun %dcc-reject (frame network connection)
+  "Reject the pending DCC CONNECTION on NETWORK."
+  (declare (ignore frame))
+  (when (and network connection)
+    (irc:dcc-reject (network-dcc network) (irc:dcc-connection-id connection))
+    (com-note (format nil "DCC #~A rejected" (irc:dcc-connection-id connection)))))
+
+(define-clatter-clim-command (com-dcc-chat :name "DCC Chat")
+    ((who 'nick))
+  (let* ((frame *application-frame*)
+         (network (current-network frame))
+         (conn (and network (network-connection network))))
+    (when conn
+      (let ((chat (irc:dcc-initiate-chat (network-dcc network) (bare-nick who) conn)))
+        (when chat
+          (open-dcc-buffer frame network chat)
+          (com-note (format nil "DCC CHAT offered to ~A, waiting for them to connect..."
+                            (bare-nick who)))
+          (redisplay-current frame))))))
+
+(define-clatter-clim-command (com-dcc-send :name "DCC Send")
+    ((who 'nick) (file 'string))
+  (let* ((frame *application-frame*)
+         (network (current-network frame))
+         (conn (and network (network-connection network))))
+    (when conn
+      (let ((send (irc:dcc-initiate-send (network-dcc network) (bare-nick who) file conn)))
+        (com-note (if send
+                      (format nil "DCC SEND ~A offered to ~A" file (bare-nick who))
+                      (format nil "DCC SEND failed (file not found?): ~A" file)))))))
+
+;; Accept/reject from the clickable offer presentation (object is a DCC-OFFER).
+(define-clatter-clim-command (com-dcc-accept :name "DCC Accept")
+    ((offer 'dcc-offer))
+  (%dcc-accept *application-frame* (dcc-offer-network offer) (dcc-offer-connection offer)))
+
+(define-clatter-clim-command (com-dcc-reject :name "DCC Reject")
+    ((offer 'dcc-offer))
+  (%dcc-reject *application-frame* (dcc-offer-network offer) (dcc-offer-connection offer)))
+
+;; Accept/reject/list by id, for typed /dcc commands.
+(define-clatter-clim-command (com-dcc-accept-id :name "DCC Accept Id")
+    ((id 'integer))
+  (let* ((frame *application-frame*) (network (current-network frame)))
+    (when network (%dcc-accept frame network (find-dcc network id)))))
+
+(define-clatter-clim-command (com-dcc-reject-id :name "DCC Reject Id")
+    ((id 'integer))
+  (let* ((frame *application-frame*) (network (current-network frame)))
+    (when network (%dcc-reject frame network (find-dcc network id)))))
+
+(define-clatter-clim-command (com-dcc-list :name "DCC List")
+    ()
+  (let* ((frame *application-frame*)
+         (network (current-network frame))
+         (mgr (and network (network-dcc-manager network)))
+         (conns (and mgr (irc:dcc-list mgr))))
+    (if conns
+        (dolist (c conns)
+          (com-note (format nil "DCC #~A ~A ~A (~A)"
+                            (irc:dcc-connection-id c)
+                            (if (typep c 'irc:dcc-chat) "CHAT" "SEND")
+                            (irc:dcc-connection-nick c)
+                            (irc:dcc-connection-state c))))
+        (com-note "no DCC connections"))))
 
 ;;; ----------------------------------------------------------------------
 ;;; Nick operator / moderation actions (the right-click nick menu).  Each
@@ -265,9 +399,13 @@ MODE-STRING (e.g. \"+o\") to the clicked nick in the current channel."
   (menu-action nick-to-deop    com-deop    "De-op")
   (menu-action nick-to-voice   com-voice   "Voice")
   (menu-action nick-to-devoice com-devoice "De-voice")
-  (menu-action nick-to-kick    com-kick    "Kick")
-  (menu-action nick-to-ban     com-ban     "Ban")
-  (menu-action nick-to-ignore  com-ignore  "Ignore / unignore"))
+  (menu-action nick-to-kick     com-kick     "Kick")
+  (menu-action nick-to-ban      com-ban      "Ban")
+  (menu-action nick-to-ignore   com-ignore   "Ignore / unignore")
+  ;; DCC Send needs a file path too; the translator supplies only the nick, so
+  ;; CLIM prompts in the interactor for the remaining FILE argument.
+  (menu-action nick-to-dcc-chat com-dcc-chat "DCC Chat")
+  (menu-action nick-to-dcc-send com-dcc-send "DCC Send"))
 
 (define-presentation-to-command-translator channel-to-join
     (irc-channel com-join clatter-clim :gesture :select :documentation "Join")
@@ -279,6 +417,16 @@ MODE-STRING (e.g. \"+o\") to the clicked nick in the current channel."
 
 (define-presentation-to-command-translator buffer-to-switch
     (buffer com-switch-buffer clatter-clim :gesture :select :documentation "Switch")
+    (object) (list object))
+
+;;; A clickable incoming DCC offer: left-click accepts, the right-click menu
+;;; offers reject (mirroring the nick translators above).
+(define-presentation-to-command-translator dcc-offer-accept
+    (dcc-offer com-dcc-accept clatter-clim :gesture :select :documentation "Accept DCC")
+    (object) (list object))
+
+(define-presentation-to-command-translator dcc-offer-reject
+    (dcc-offer com-dcc-reject clatter-clim :gesture nil :documentation "Reject DCC")
     (object) (list object))
 
 ;;; Custom-drawn buttons (toolbar, dialogs): clicking a UI-BUTTON runs its

@@ -106,7 +106,24 @@ This phase proves the bridge end to end.  Get it right before anything else.
       the current buffer; welcome/MOTD/lusers and other numerics go to the
       server buffer; structural/noisy codes (ISUPPORT, topic, modes) are
       skipped, NAMES still refreshes the nick list.
-- [ ] IRCv3 niceties clatter-irc already provides: server-time on lines,
-      message batches (SASL on connect is done).
-- [ ] Multiple servers / connections, one buffer list.
-- [ ] DCC chat and send surfaced as commands and presentations.
+- [X] IRCv3 niceties clatter-irc already provides: server-time on lines
+      (inbound privmsg/notice/action lines are stamped from the IRCv3 =time=
+      tag when present, so bouncer/history playback shows when a line was
+      actually said; falls back to receipt time).  Message batches are handled
+      transparently by clatter-irc (batched lines still arrive through the
+      normal hooks).  SASL on connect is done.
+- [X] Multiple servers / connections, one buffer list.  Each Connect adds a
+      NETWORK object owning its own clatter-irc connection; every buffer carries
+      a back-pointer to its network so the same channel name on two networks
+      stays a distinct buffer.  The buffer list groups by network (header per
+      network once more than one is open), the status bar shows the current
+      network label, and commands act on the current buffer's network.  Autojoin
+      and the persisted autojoin list only apply to the configured server.
+- [X] DCC chat and send surfaced as commands and presentations.  clatter-irc
+      owns the transport (a per-network dcc-manager and its connection threads);
+      clatter-clim wires the on-dcc hook so incoming offers appear as a clickable
+      [accept] DCC-OFFER presentation (left-click accepts, right-click menu
+      rejects).  Commands: =DCC Chat=, =DCC Send=, =DCC List=, plus =/dcc
+      chat|send|accept|reject|list=; nick right-click menu gains DCC Chat / DCC
+      Send.  A DCC CHAT opens a :dcc buffer whose SAY routes over the direct
+      connection, and inbound lines arrive through the same mailbox bridge.

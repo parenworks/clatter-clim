@@ -26,6 +26,11 @@
 (define-presentation-type ui-button ()
   :description "a button")
 
+;;; A pending incoming DCC offer.  The object is a DCC-OFFER struct (model.lisp);
+;;; click accepts it, the right-click menu offers reject (see commands.lisp).
+(define-presentation-type dcc-offer ()
+  :description "a DCC offer")
+
 (define-presentation-method present (object (type buffer) stream view &key)
   (declare (ignore view))
   (format stream "~A" (buffer-name object)))

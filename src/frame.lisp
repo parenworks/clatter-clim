@@ -183,7 +183,8 @@ DEFAULT-INK.  Whitespace runs are emitted verbatim so spacing is preserved."
           (setf start tok-end))))))
 
 (define-application-frame clatter-clim ()
-  ((connection   :initform nil :accessor app-connection)
+  ((networks     :initform '() :accessor app-networks
+                 :documentation "All open server connections (NETWORK objects).")
    (buffers      :initform '() :accessor app-buffers)
    (current      :initform nil :accessor app-current)
    ;; The mailbox is the only state the IRC reader thread writes to, under
@@ -254,6 +255,18 @@ DEFAULT-INK.  Whitespace runs are emitted verbatim so spacing is preserved."
     (setf (buffer-unread buffer) 0
           (buffer-ping buffer) nil)))
 
+(defun current-network (frame)
+  "The NETWORK of the current buffer, or NIL when nothing is open."
+  (let ((b (app-current frame)))
+    (and b (buffer-network b))))
+
+(defun app-connection (frame)
+  "The clatter-irc connection commands should act on: the current buffer's
+network connection.  NIL when disconnected or no buffer is open.  Replaces the
+old single-connection slot now that a frame may hold several networks."
+  (let ((n (current-network frame)))
+    (and n (network-connection n))))
+
 (defun hhmm (universal)
   "Format a universal time as a local HH:MM string."
   (multiple-value-bind (s m h) (decode-universal-time (or universal (get-universal-time)))
@@ -270,14 +283,15 @@ DEFAULT-INK.  Whitespace runs are emitted verbatim so spacing is preserved."
       (ecase (irc-line-kind line)
         (:privmsg (format nil "~A <~A> ~A" ts nick text))
         (:notice  (format nil "~A -~A- ~A" ts nick text))
-        ((:join :part :quit :topic :system) (format nil "~A -!- ~A" ts text))))))
+        ((:join :part :quit :topic :system :dcc-offer) (format nil "~A -!- ~A" ts text))))))
 
-(defun log-line (frame target line)
-  "Append LINE to TARGET's on-disk log.  Best-effort: errors (a full disk, a
-bad path) are swallowed so logging never disturbs the UI."
+(defun log-line (frame network target line)
+  "Append LINE to TARGET's on-disk log under NETWORK's server directory.
+Best-effort: errors (a full disk, a bad path) are swallowed so logging never
+disturbs the UI."
+  (declare (ignore frame))
   (ignore-errors
-    (let* ((conn (app-connection frame))
-           (server (or (and conn (irc:connection-server conn)) "server"))
+    (let* ((server (or (and network (network-label network)) "server"))
            (path (buffer-log-path server target)))
       (ensure-directories-exist path)
       (with-open-file (s path :direction :output
@@ -292,7 +306,8 @@ lines (privmsg/notice) count; join/part churn does not."
   (when (and (not (eq buffer (app-current frame)))
              (member (irc-line-kind line) '(:privmsg :notice)))
     (incf (buffer-unread buffer))
-    (let ((me (let ((conn (app-connection frame)))
+    (let ((me (let* ((net (buffer-network buffer))
+                     (conn (and net (network-connection net))))
                 (and conn (irc:connection-nick conn)))))
       (when (and me (mentions-p (irc-line-text line) me))
         (setf (buffer-ping buffer) t)))))
@@ -302,21 +317,36 @@ lines (privmsg/notice) count; join/part churn does not."
 ;;; backend-agnostic: identical code drives CLX, the terminal and the browser.
 ;;; ----------------------------------------------------------------------
 
+(defun display-buffer-line (frame pane b)
+  "Paint one buffer row B as a clickable BUFFER presentation."
+  (let* ((current-p (eq b (app-current frame)))
+         (unread (buffer-unread b))
+         (ping (buffer-ping b))
+         (ink (cond (current-p *colour-heading*)
+                    (ping *colour-highlight*)
+                    ((plusp unread) *colour-fg-default*)
+                    (t *colour-muted*)))
+         (badge (with-output-to-string (s)
+                  (when (plusp unread) (format s " (~D)" unread))
+                  (when ping (write-string " *" s)))))
+    (with-output-as-presentation (pane b 'buffer)
+      (with-drawing-options (pane :ink ink)
+        (format pane "~:[  ~;> ~]~A~A~%" current-p (buffer-name b) badge)))))
+
 (defun display-buffer-list (frame pane)
-  (dolist (b (app-buffers frame))
-    (let* ((current-p (eq b (app-current frame)))
-           (unread (buffer-unread b))
-           (ping (buffer-ping b))
-           (ink (cond (current-p *colour-heading*)
-                      (ping *colour-highlight*)
-                      ((plusp unread) *colour-fg-default*)
-                      (t *colour-muted*)))
-           (badge (with-output-to-string (s)
-                    (when (plusp unread) (format s " (~D)" unread))
-                    (when ping (write-string " *" s)))))
-      (with-output-as-presentation (pane b 'buffer)
-        (with-drawing-options (pane :ink ink)
-          (format pane "~:[  ~;> ~]~A~A~%" current-p (buffer-name b) badge))))))
+  ;; Group buffers under their network.  With one network the header is
+  ;; suppressed so the single-server case looks exactly as before; with several
+  ;; networks each gets a labelled section, keeping same-named channels apart.
+  (let ((networks (app-networks frame)))
+    (if (cdr networks)
+        (dolist (net networks)
+          (with-drawing-options (pane :ink *colour-heading*)
+            (format pane "~A~%" (network-label net)))
+          (dolist (b (app-buffers frame))
+            (when (eq (buffer-network b) net)
+              (display-buffer-line frame pane b))))
+        (dolist (b (app-buffers frame))
+          (display-buffer-line frame pane b)))))
 
 (defun display-messages (frame pane)
   (let* ((b (app-current frame))
@@ -343,7 +373,20 @@ lines (privmsg/notice) count; join/part churn does not."
              (terpri pane)))
           ((:join :part :quit :topic :system)
            (with-drawing-options (pane :ink *colour-muted*)
-             (format pane "~A -!- ~A~%" (hhmm (irc-line-time line)) (irc-line-text line)))))))))
+             (format pane "~A -!- ~A~%" (hhmm (irc-line-time line)) (irc-line-text line))))
+          (:dcc-offer
+           ;; A clickable incoming DCC offer: the description, then an [accept]
+           ;; affordance presented as a DCC-OFFER (left-click accepts, the
+           ;; right-click menu rejects; see the translators in commands.lisp).
+           (with-drawing-options (pane :ink *colour-muted*)
+             (format pane "~A -!- " (hhmm (irc-line-time line))))
+           (with-drawing-options (pane :ink *colour-highlight*)
+             (write-string (irc-line-text line) pane))
+           (write-string " " pane)
+           (with-output-as-presentation (pane (irc-line-data line) 'dcc-offer)
+             (with-drawing-options (pane :ink *colour-url*)
+               (write-string "[accept]" pane)))
+           (terpri pane)))))))
 
 (defun display-nick-list (frame pane)
   (let ((b (app-current frame)))
@@ -354,11 +397,13 @@ lines (privmsg/notice) count; join/part churn does not."
         (terpri pane)))))
 
 (defun display-status (frame pane)
-  (let* ((conn (app-connection frame))
+  (let* ((net (current-network frame))
+         (conn (and net (network-connection net)))
          (b (app-current frame))
          (connected (and conn (irc:connectedp conn))))
-    (format pane "~A | ~A | ~A"
+    (format pane "~A | ~A | ~A | ~A"
             (if connected (irc:connection-nick conn) "(disconnected)")
+            (if net (network-label net) "(no network)")
             (if b (buffer-name b) "(no buffer)")
             (if b (buffer-topic b) ""))))
 
@@ -501,7 +546,27 @@ completion on the last token."
           ((string= cmd "quit")       (list 'com-quit))
           ((string= cmd "connect")    (list 'com-connect))
           ((string= cmd "disconnect") (list 'com-disconnect))
+          ((string= cmd "dcc")        (parse-dcc-command args))
           (t (list 'com-note (format nil "unknown command: /~A" word))))))))
+
+(defun parse-dcc-command (args)
+  "Turn the body of a /dcc command into a command list:
+/dcc chat <nick> | send <nick> <file> | accept <id> | reject <id> | list."
+  (multiple-value-bind (sub rest) (%split-first args)
+    (let ((sub (string-downcase sub)))
+      (flet ((int (s) (parse-integer s :junk-allowed t)))
+        (cond
+          ((string= sub "chat")   (list 'com-dcc-chat (nth-value 0 (%split-first rest))))
+          ((string= sub "send")   (multiple-value-bind (n f) (%split-first rest)
+                                    (list 'com-dcc-send n f)))
+          ((string= sub "accept") (let ((id (int (nth-value 0 (%split-first rest)))))
+                                    (if id (list 'com-dcc-accept-id id)
+                                        (list 'com-note "usage: /dcc accept <id>"))))
+          ((string= sub "reject") (let ((id (int (nth-value 0 (%split-first rest)))))
+                                    (if id (list 'com-dcc-reject-id id)
+                                        (list 'com-note "usage: /dcc reject <id>"))))
+          ((string= sub "list")   (list 'com-dcc-list))
+          (t (list 'com-note "usage: /dcc chat|send|accept|reject|list")))))))
 
 (defmethod read-frame-command ((frame clatter-clim) &key (stream *standard-input*))
   ;; Establish a command input context so clicking a presentation (a buffer in
